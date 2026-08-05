@@ -80,6 +80,8 @@ pub enum PropKind {
     AliasRef,
     /// A `Vec<String>` field; set via comma-separated input.
     StringArray,
+    /// A `Vec<i64>` field; set via comma-separated integer input.
+    IntegerArray,
     ObjectArray,
     Object,
 }
@@ -126,6 +128,9 @@ impl_prop_kind!(
 );
 impl HasPropKind for Vec<String> {
     const PROP_KIND: PropKind = PropKind::StringArray;
+}
+impl HasPropKind for Vec<i64> {
+    const PROP_KIND: PropKind = PropKind::IntegerArray;
 }
 
 // The per-category provider-ref newtypes (defined in `crate::providers`)
@@ -397,6 +402,7 @@ impl PropKind {
             Self::Enum => "enum",
             Self::AliasRef => "alias_ref",
             Self::StringArray => "string_array",
+            Self::IntegerArray => "integer_array",
             Self::ObjectArray => "object_array",
             Self::Object => "object",
         }
