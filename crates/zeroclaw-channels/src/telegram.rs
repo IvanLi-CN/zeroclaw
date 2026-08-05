@@ -6370,7 +6370,7 @@ mod tests {
         tokio::pin!(listener);
         tokio::select! {
             result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
-            _ = async {
+            result = tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
                     let requests = mock_server.received_requests().await.unwrap();
                     if requests.iter().any(|request| {
@@ -6387,7 +6387,13 @@ mod tests {
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            } => {}
+            }) => match result {
+                Ok(()) => {}
+                Err(_) => panic!(
+                    "listener did not advance past the unlisted group: {:?}",
+                    mock_server.received_requests().await.unwrap()
+                ),
+            }
         }
 
         assert!(
