@@ -194,8 +194,8 @@ pub struct ListEntry {
     pub path: String,
     pub category: String,
     /// Stable kind tag — `string`, `bool`, `integer`, `float`, `enum`,
-    /// `string-array`. Lowercase-kebab so it can be used directly as a CSS
-    /// class or React key.
+    /// `string-array`, `integer-array`. Lowercase-kebab so it can be used
+    /// directly as a CSS class or React key.
     pub kind: &'static str,
     /// Rust type signature, e.g. `Option<String>`, `Vec<String>`, `u64`.
     /// Render in tooltips / hover state for the technically-curious.

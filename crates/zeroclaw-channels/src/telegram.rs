@@ -6313,6 +6313,98 @@ mod tests {
         assert!(mock_server.received_requests().await.unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn unlisted_group_listener_skips_pairing_ack_typing_and_dispatch() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(Vec::new), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_ack_reactions(true)
+            .with_api_base(mock_server.uri());
+        let pairing_code = ch
+            .pairing
+            .as_ref()
+            .and_then(PairingGuard::pairing_code)
+            .expect("channel without peers starts pairing");
+        let update = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 6,
+                "text": format!("/bind {pairing_code}"),
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" }
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/getUpdates$"))
+            .and(body_json(&serde_json::json!({
+                "offset": 0,
+                "timeout": 0,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [] })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/getUpdates$"))
+            .and(body_json(&serde_json::json!({
+                "offset": 0,
+                "timeout": 30,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [update] })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let listener = ch.listen(tx);
+        tokio::pin!(listener);
+        tokio::select! {
+            result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
+            _ = async {
+                loop {
+                    let requests = mock_server.received_requests().await.unwrap();
+                    if requests.iter().any(|request| {
+                        let body = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+                        request.url.path() == "/bottoken/getUpdates"
+                            && body.as_ref().and_then(|body| body.get("timeout"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(30)
+                            && body.as_ref().and_then(|body| body.get("offset"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(2)
+                    }) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } => {}
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "unlisted group must not reach dispatch"
+        );
+        let requests = mock_server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|request| {
+            !matches!(
+                request.url.path(),
+                "/bottoken/sendMessage"
+                    | "/bottoken/setMessageReaction"
+                    | "/bottoken/sendChatAction"
+            )
+        }));
+    }
+
     #[test]
     fn check_media_mention_gate_rejects_group_media_without_mention() {
         let ch = TelegramChannel::new(
