@@ -22,6 +22,45 @@ tokio::task_local! {
     pub static TURN_ROUTING: Option<TurnRoutingHandle>;
 }
 
+tokio::task_local! {
+    /// The originating channel's immediate text route for an active Telegram
+    /// turn. It is scoped by the orchestrator and cannot outlive that turn.
+    pub static TURN_IMMEDIATE_DELIVERY: Option<ImmediateDeliveryContext>;
+}
+
+/// Originating-channel delivery details for an immediate text send during an
+/// active Telegram turn. The channel and recipient come from the current
+/// inbound message, never from model-provided tool arguments.
+#[derive(Clone)]
+pub struct ImmediateDeliveryContext {
+    channel: Arc<dyn Channel>,
+    recipient: String,
+    thread_ts: Option<String>,
+}
+
+impl ImmediateDeliveryContext {
+    pub fn new(
+        channel: Arc<dyn Channel>,
+        recipient: impl Into<String>,
+        thread_ts: Option<String>,
+    ) -> Self {
+        Self {
+            channel,
+            recipient: recipient.into(),
+            thread_ts,
+        }
+    }
+
+    fn message(&self, body: &str, modality: OutputModality) -> SendMessage {
+        let message = SendMessage::new(body, &self.recipient).in_thread(self.thread_ts.clone());
+        match modality {
+            OutputModality::Voice => message.force_voice(),
+            OutputModality::Text => message.suppress_voice(),
+            OutputModality::Mirror => message,
+        }
+    }
+}
+
 /// Return type of [`SendViaTool::resolve_target`]: resolved channel key, channel arc,
 /// modality, and optional explicit recipient.
 type ResolvedTarget = Result<(String, Arc<dyn Channel>, OutputModality, Option<String>), String>;
@@ -186,7 +225,8 @@ impl Tool for SendViaTool {
          \n\
          With `body` (immediate fanout — main reply still goes to originating channel):\n\
          - `send_via(target: \"email.default\", body: \"...\")` — send separate content elsewhere\n\
-         `target` is required when `body` is present.\n\
+         - In an active Telegram turn, omit target to send text to the current chat before a sticker.\n\
+         A target is required when body is present outside an active Telegram turn.\n\
          \n\
          `target` must be a channel alias (e.g. `telegram.default`) or a peer group name \
          the active agent belongs to. `modality` defaults to the peer group's output_modality."
@@ -199,7 +239,8 @@ impl Tool for SendViaTool {
                 "target": {
                     "type": "string",
                     "description": "Channel alias (e.g. telegram.default) or peer group name. \
-                                    Required when body is present. Optional otherwise (omit = same channel)."
+                                    Required when body is present except in an active Telegram turn. \
+                                    Optional otherwise (omit = same channel)."
                 },
                 "modality": {
                     "type": "string",
@@ -251,6 +292,48 @@ impl Tool for SendViaTool {
 
         // ── Immediate send mode (body present) ───────────────────────────────
         if let Some(body) = body {
+            if target.is_none() {
+                let context = TURN_IMMEDIATE_DELIVERY
+                    .try_with(Clone::clone)
+                    .ok()
+                    .flatten();
+                let Some(context) = context else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: ToolOutput::json(json!({
+                            "status": "rejected",
+                            "reason": "a target is required when body is present outside an active Telegram turn"
+                        })),
+                        error: None,
+                    });
+                };
+                let modality = explicit_modality.unwrap_or(OutputModality::Text);
+                return match context
+                    .channel
+                    .send(&context.message(&body, modality))
+                    .await
+                {
+                    Ok(()) => Ok(ToolResult {
+                        success: true,
+                        output: ToolOutput::json(json!({
+                            "target": "<originating>",
+                            "mode": "immediate",
+                            "resolved_modality": modality_str(modality),
+                            "status": "ok"
+                        })),
+                        error: None,
+                    }),
+                    Err(e) => Ok(ToolResult {
+                        success: false,
+                        output: ToolOutput::json(json!({
+                            "target": "<originating>",
+                            "status": "failed",
+                            "reason": e.to_string()
+                        })),
+                        error: None,
+                    }),
+                };
+            }
             let target_key = match target {
                 Some(ref t) => t.clone(),
                 None => {
@@ -549,6 +632,33 @@ mod tests {
             external_peers: peers.iter().map(|p| PeerUsername::new(*p)).collect(),
             ..PeerGroupConfig::default()
         }
+    }
+
+    #[tokio::test]
+    async fn immediate_body_without_target_uses_active_telegram_turn_delivery() {
+        let channel = Arc::new(StubChannel::new("telegram"));
+        let (tool, _) = make_tool(vec![], HashMap::new());
+        let context = ImmediateDeliveryContext::new(
+            channel.clone(),
+            "-100200300:42",
+            Some("thread-42".into()),
+        );
+
+        let result = TURN_IMMEDIATE_DELIVERY
+            .scope(
+                Some(context),
+                tool.execute(json!({"body": "Text before the sticker"})),
+            )
+            .await
+            .expect("immediate active-turn send returns a tool result");
+
+        assert!(result.success, "active Telegram delivery should succeed");
+        let sent = channel.sent.read();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content, "Text before the sticker");
+        assert_eq!(sent[0].recipient, "-100200300:42");
+        assert_eq!(sent[0].thread_ts.as_deref(), Some("thread-42"));
+        assert!(sent[0].suppress_voice);
     }
 
     // ── Routing instruction mode ──────────────────────────────────────────────

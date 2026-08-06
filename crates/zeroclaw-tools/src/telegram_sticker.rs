@@ -68,6 +68,7 @@ impl TelegramStickerTurnContext {
 pub struct TelegramStickerConfig {
     pub bot_token: String,
     pub api_base_url: String,
+    pub proxy_url: Option<String>,
     pub sticker_sets: Vec<String>,
 }
 
@@ -141,7 +142,6 @@ impl StickerSetCache {
 pub struct TelegramStickerTool {
     security: Arc<SecurityPolicy>,
     config_resolver: TelegramStickerConfigResolver,
-    http_client: reqwest::Client,
     cache: Mutex<StickerSetCache>,
 }
 
@@ -153,7 +153,6 @@ impl TelegramStickerTool {
         Self {
             security,
             config_resolver,
-            http_client: reqwest::Client::new(),
             cache: Mutex::new(StickerSetCache::default()),
         }
     }
@@ -181,18 +180,20 @@ impl TelegramStickerTool {
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let response = self
-            .http_client
-            .post(Self::api_url(config, method))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| {
-                tool_string_with_args(
-                    "tool-telegram-sticker-error-transport",
-                    &[("method", method)],
-                )
-            })?;
+        let response = zeroclaw_config::schema::build_channel_proxy_client(
+            "channel.telegram",
+            config.proxy_url.as_deref(),
+        )
+        .post(Self::api_url(config, method))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| {
+            tool_string_with_args(
+                "tool-telegram-sticker-error-transport",
+                &[("method", method)],
+            )
+        })?;
         let status = response.status();
         let response_body = response.text().await.map_err(|_| {
             tool_string_with_args(
@@ -412,6 +413,7 @@ mod tests {
             (alias == "home").then(|| TelegramStickerConfig {
                 bot_token: "test-token".into(),
                 api_base_url: api_base_url.clone(),
+                proxy_url: None,
                 sticker_sets: vec!["mood_pack".into()],
             })
         })
@@ -611,6 +613,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telegram_sticker_requests_use_the_configured_channel_proxy() {
+        let proxy_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(json!({"name": "mood_pack"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": {"stickers": []},
+            })))
+            .expect(1)
+            .mount(&proxy_server)
+            .await;
+        let config = TelegramStickerConfig {
+            bot_token: "test-token".into(),
+            api_base_url: "http://unreachable.telegram.invalid".into(),
+            proxy_url: Some(proxy_server.uri()),
+            sticker_sets: vec!["mood_pack".into()],
+        };
+        let tool =
+            TelegramStickerTool::new(Arc::new(SecurityPolicy::default()), Arc::new(|_| None));
+
+        let response = tool
+            .telegram_api_call(&config, "getStickerSet", json!({"name": "mood_pack"}))
+            .await;
+
+        assert!(
+            response.is_ok(),
+            "configured proxy should receive the request"
+        );
+    }
+
+    #[tokio::test]
     async fn sticker_action_obeys_the_act_policy_gate() {
         let policy = SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
@@ -655,6 +688,7 @@ mod tests {
         let first = TelegramStickerConfig {
             bot_token: "first-token".into(),
             api_base_url: "https://api.telegram.org".into(),
+            proxy_url: None,
             sticker_sets: vec!["mood_pack".into()],
         };
         let second = TelegramStickerConfig {

@@ -103,7 +103,8 @@ pub use zeroclaw_tools::reaction::ReactionTool;
 pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
 pub use zeroclaw_tools::screenshot::ScreenshotTool;
 pub use zeroclaw_tools::send_via::{
-    AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
+    AgentPeerGroupResolver, ImmediateDeliveryContext, SendViaTool, TURN_IMMEDIATE_DELIVERY,
+    TURN_ROUTING, TurnRoutingHandle,
 };
 pub use zeroclaw_tools::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
@@ -1261,6 +1262,7 @@ pub fn all_tools_with_runtime(
                     Some(TelegramStickerConfig {
                         bot_token: telegram.bot_token.clone(),
                         api_base_url: telegram.api_base_url.clone(),
+                        proxy_url: telegram.proxy_url.clone(),
                         sticker_sets: config.channels.telegram_sticker_sets.clone(),
                     })
                 })
@@ -1271,6 +1273,7 @@ pub fn all_tools_with_runtime(
                     Some(TelegramStickerConfig {
                         bot_token: telegram.bot_token.clone(),
                         api_base_url: telegram.api_base_url.clone(),
+                        proxy_url: telegram.proxy_url.clone(),
                         sticker_sets: channels.telegram_sticker_sets.clone(),
                     })
                 })

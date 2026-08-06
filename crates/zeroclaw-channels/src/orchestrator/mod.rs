@@ -3794,6 +3794,14 @@ fn should_suppress_sticker_only_reply(successful_sticker_sends: usize, response:
         )
 }
 
+fn sticker_only_reply_history_marker(
+    successful_sticker_sends: usize,
+    response: &str,
+) -> Option<String> {
+    should_suppress_sticker_only_reply(successful_sticker_sends, response)
+        .then(|| parse_reply_intent(response).history_marker())
+}
+
 /// Remove leading lines that narrate tool usage (e.g. "Let me check the weather for you.").
 /// Only strips lines from the very beginning of the message that match common
 /// narration patterns, so genuine content is preserved.
@@ -5431,6 +5439,16 @@ async fn process_channel_message_body(
         .then(|| msg.channel_alias.as_deref())
         .flatten()
         .map(|alias| tools::TelegramStickerTurnContext::new(alias, msg.reply_target.clone()));
+    let telegram_immediate_delivery_context = (msg.channel == "telegram")
+        .then(|| target_channel.as_ref())
+        .flatten()
+        .map(|channel| {
+            tools::ImmediateDeliveryContext::new(
+                std::sync::Arc::clone(channel),
+                msg.reply_target.clone(),
+                msg.thread_ts.clone(),
+            )
+        });
 
     let tool_receipts_collector: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -5560,6 +5578,8 @@ async fn process_channel_message_body(
                 tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
             let tool_loop = tools::TURN_TELEGRAM_STICKER_CONTEXT
                 .scope(telegram_sticker_context.clone(), tool_loop);
+            let tool_loop = tools::TURN_IMMEDIATE_DELIVERY
+                .scope(telegram_immediate_delivery_context.clone(), tool_loop);
             let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
                 .scope(thinking.params.native_thinking, tool_loop);
             let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
@@ -5787,7 +5807,9 @@ async fn process_channel_message_body(
                 Some(context) => context.successful_sends().await,
                 None => 0,
             };
-            if should_suppress_sticker_only_reply(successful_sticker_sends, &response) {
+            if let Some(history_marker) =
+                sticker_only_reply_history_marker(successful_sticker_sends, &response)
+            {
                 // A sticker-only reply already has visible Telegram output. Do
                 // not replace the intentional informational no-reply marker with
                 // the generic empty-text fallback message.
@@ -5796,6 +5818,27 @@ async fn process_channel_message_body(
                 {
                     let _ = channel.cancel_draft(&msg.reply_target, draft_id).await;
                 }
+                let keep_tool_turns = ctx.agent_cfg.resolved.keep_tool_context_turns;
+                if keep_tool_turns > 0 {
+                    let tool_messages: Vec<ChatMessage> =
+                        extract_current_turn_tool_messages(&history);
+                    for tool_msg in tool_messages {
+                        append_sender_turn(ctx.as_ref(), &history_key, tool_msg);
+                    }
+                }
+                append_sender_turn(
+                    ctx.as_ref(),
+                    &history_key,
+                    ChatMessage::assistant(&history_marker),
+                );
+                reconcile_early_ack(
+                    ctx.as_ref(),
+                    &msg,
+                    target_channel.as_ref(),
+                    early_ack_task,
+                    Some(reaction_done_emoji),
+                )
+                .await;
                 return;
             }
             // ── Hook: on_message_sending (modifying) ─────────
@@ -13430,6 +13473,11 @@ api_key = "anthropic-key"
             "NO_REPLY[FAIL]: sticker failed"
         ));
         assert!(!should_suppress_sticker_only_reply(1, "Thanks!"));
+        assert_eq!(
+            sticker_only_reply_history_marker(1, "NO_REPLY[INFO]: sticker sent"),
+            Some("[No reply sent: sticker sent]".into())
+        );
+        assert_eq!(sticker_only_reply_history_marker(0, "NO_REPLY[INFO]"), None);
     }
 
     #[test]

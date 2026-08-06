@@ -170,10 +170,13 @@ An unconfigured or unavailable pack, an unmatched emoji, a Telegram API
 failure, and a fourth attempt all return a tool failure without claiming
 delivery.
 
-Use `send_via` for text that must appear before a sticker and the ordinary
-assistant response for text that follows it. When a sticker is the only visible
-reply, the agent returns `NO_REPLY[INFO]` after the successful tool call; the
-channel runtime then avoids sending an empty fallback text message.
+For text that must appear before a sticker in the same Telegram conversation,
+call `send_via` with a `body` and no `target`; its active-turn route sends that
+text to the current chat before the following sticker tool call. The ordinary
+assistant response supplies text that follows a sticker. When a sticker is the
+only visible reply, the agent returns `NO_REPLY[INFO]` after the successful
+tool call; the channel runtime then avoids sending an empty fallback text
+message.
 
 ## 4. Start the channel and inspect it
 
