@@ -25757,6 +25757,7 @@ auto_save = true
                         reply_queue_depth_max: 0,
                     },
                 )]),
+                telegram_sticker_sets: Vec::new(),
                 discord: HashMap::new(),
                 slack: HashMap::new(),
                 mattermost: HashMap::new(),
@@ -27474,6 +27475,7 @@ allowed_users = ["@u:matrix.org"]
         let c = ChannelsConfig {
             cli: true,
             telegram: HashMap::new(),
+            telegram_sticker_sets: Vec::new(),
             discord: HashMap::new(),
             slack: HashMap::new(),
             mattermost: HashMap::new(),
@@ -28043,6 +28045,7 @@ allowed_numbers = ["+1", "+2"]
         let c = ChannelsConfig {
             cli: true,
             telegram: HashMap::new(),
+            telegram_sticker_sets: Vec::new(),
             discord: HashMap::new(),
             slack: HashMap::new(),
             mattermost: HashMap::new(),
