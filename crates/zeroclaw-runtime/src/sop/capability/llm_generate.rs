@@ -25,6 +25,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 use zeroclaw_api::model_provider::ModelProvider;
+use zeroclaw_providers::ProviderDispatch;
 
 use super::types::{CapabilityContext, CapabilityInfo, CapabilityResult, SopCapability};
 
@@ -202,7 +203,7 @@ impl LlmGenerateAdapter for ProviderLlmAdapter {
         let prompt = prompt.to_string();
         super::bridge::run_bridged(
             async move {
-                provider
+                ProviderDispatch::from_ref(&*provider)
                     .chat_with_system(system.as_deref(), &prompt, &model, None)
                     .await
                     .map_err(|e| e.to_string())
@@ -216,6 +217,7 @@ impl LlmGenerateAdapter for ProviderLlmAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::sync::Mutex;
 
     struct RecordingLlm {
@@ -230,6 +232,52 @@ mod tests {
                 .unwrap()
                 .push((system.map(str::to_string), prompt.to_string()));
             self.result.clone()
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ProviderCall {
+        system: Option<String>,
+        prompt: String,
+        model: String,
+        temperature: Option<f64>,
+    }
+
+    struct RecordingProvider {
+        calls: Mutex<Vec<ProviderCall>>,
+        result: Result<String, String>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingProvider {
+        async fn chat_with_system(
+            &self,
+            system_prompt: Option<&str>,
+            message: &str,
+            model: &str,
+            temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push(ProviderCall {
+                system: system_prompt.map(str::to_string),
+                prompt: message.to_string(),
+                model: model.to_string(),
+                temperature,
+            });
+            self.result.clone().map_err(anyhow::Error::msg)
+        }
+    }
+
+    impl zeroclaw_api::attribution::Attributable for RecordingProvider {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            zeroclaw_api::attribution::Role::Provider(
+                zeroclaw_api::attribution::ProviderKind::Model(
+                    zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+
+        fn alias(&self) -> &str {
+            "recording-provider"
         }
     }
 
@@ -250,6 +298,39 @@ mod tests {
             .unwrap();
         assert!(!out.success);
         assert!(out.error.unwrap().contains("requires an injected"));
+    }
+
+    #[test]
+    fn provider_adapter_preserves_request_and_error_behavior() {
+        let provider = Arc::new(RecordingProvider {
+            calls: Mutex::new(Vec::new()),
+            result: Ok("generated".into()),
+        });
+        let adapter = ProviderLlmAdapter::new(provider.clone(), "configured-model".into());
+
+        assert_eq!(
+            adapter.generate(Some("system"), "prompt").unwrap(),
+            "generated"
+        );
+        assert_eq!(
+            provider.calls.lock().unwrap().as_slice(),
+            &[ProviderCall {
+                system: Some("system".into()),
+                prompt: "prompt".into(),
+                model: "configured-model".into(),
+                temperature: None,
+            }]
+        );
+
+        let failing = Arc::new(RecordingProvider {
+            calls: Mutex::new(Vec::new()),
+            result: Err("provider failure".into()),
+        });
+        let adapter = ProviderLlmAdapter::new(failing, "configured-model".into());
+        assert_eq!(
+            adapter.generate(None, "prompt").unwrap_err(),
+            "provider failure"
+        );
     }
 
     #[test]
