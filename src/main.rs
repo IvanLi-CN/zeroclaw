@@ -5530,10 +5530,13 @@ async fn async_main(command: clap::Command) -> Result<()> {
                             .default(current_index)
                             .interact()?;
                         config.set_prop_persistent(&path, &variants[selected])?;
-                    } else if field_info
-                        .as_ref()
-                        .is_some_and(|f| f.kind == crate::config::PropKind::StringArray)
-                    {
+                    } else if field_info.as_ref().is_some_and(|f| {
+                        matches!(
+                            f.kind,
+                            crate::config::PropKind::StringArray
+                                | crate::config::PropKind::IntegerArray
+                        )
+                    }) {
                         let current_items: Vec<String> = field_info
                             .as_ref()
                             .and_then(|f| {
@@ -5550,7 +5553,11 @@ async fn async_main(command: clap::Command) -> Result<()> {
                                     .and_then(|v| v.as_array().cloned())
                                     .map(|arr| {
                                         arr.iter()
-                                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                            .filter_map(|x| {
+                                                x.as_str().map(ToOwned::to_owned).or_else(|| {
+                                                    x.as_integer().map(|value| value.to_string())
+                                                })
+                                            })
                                             .collect()
                                     })
                             })

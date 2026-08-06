@@ -6,13 +6,13 @@ bot creation through the first authorized conversation.
 
 ## How the current implementation is wired
 
-Telegram setup has three separate sources of truth. The channel block owns the
-Telegram connection, the agent block owns routing, and peer groups own inbound
-authorization:
+Telegram setup has four separate sources of truth. The channel block owns the
+Telegram connection and optional alias-scoped group gate, the agent block owns
+routing, and peer groups own direct-message authorization:
 
 ```mermaid
 flowchart LR
-    T["channels.telegram.home<br/>token and channel behavior"] --> C["TelegramChannel<br/>alias = home"]
+    T["channels.telegram.home<br/>token, group gate, behavior"] --> C["TelegramChannel<br/>alias = home"]
     P["matching peer groups<br/>authorized Telegram identities"] --> C
     G["Telegram Bot API<br/>getUpdates long poll"] --> C
     C -->|"authorized ChannelMessage"| R["AgentRouter"]
@@ -26,9 +26,10 @@ from the shared `Config` when each message arrives. It accepts either the
 sender's numeric Telegram user ID or username, then hands an authorized
 `ChannelMessage` to the shared channel dispatch and agent-turn lifecycle.
 
-There is no `allowed_users` field under `[channels.telegram.<alias>]`.
-Authorization lives in [Peer Groups](./peer-groups.md); that page is the
-canonical reference for peer-group fields, matching, and multi-agent behavior.
+Direct-message authorization lives in [Peer Groups](./peer-groups.md); that
+page is the canonical reference for peer-group fields, matching, and
+multi-agent behavior. Group authorization is separate and alias-scoped through
+`channels.telegram.<alias>.allowed_groups`.
 
 ## 1. Create a Telegram bot
 
@@ -69,6 +70,9 @@ Afterward, the relevant non-secret structure is equivalent to:
 [channels.telegram.home]
 enabled = true
 # bot_token is stored encrypted after the masked `config set` prompt
+# Optional exact Telegram group/supergroup chat IDs. An empty list preserves
+# the legacy peer-group behavior for groups.
+allowed_groups = [-100200300]
 
 [agents.primary]
 channels = ["telegram.home"]
@@ -124,6 +128,24 @@ channel instance. This includes a wildcard peer group.
 > any tools its risk profile permits. Use a wildcard only for a deliberately
 > public bot with a suitably restricted agent; it is not a shortcut for private
 > setup.
+
+### Permit group chats
+
+Set `allowed_groups` to exact numeric Telegram `chat.id` values when this alias
+should accept group or supergroup messages from every member:
+
+```toml
+[channels.telegram.home]
+allowed_groups = [-100200300, -100200301]
+```
+
+An empty list keeps the existing behavior: group messages still use the
+configured peer groups, while direct messages always continue through the
+normal peer authorization and `/bind` flow. A non-empty list rejects unlisted
+groups before pairing replies, acknowledgement reactions, media or voice
+downloads, and model work. Group membership never authorizes the same sender
+in a direct message. When `mention_only = true`, the group allowlist is checked
+first and the mention requirement is checked only for an allowed group.
 
 ## 4. Start the channel and inspect it
 
@@ -255,7 +277,7 @@ logging is enabled, events are also written under the install directory at
 | The bot still asks for operator approval after `bind-telegram` | The running foreground process has not reloaded, or the identity was bound to the wrong alias. Restart it and verify the `--alias` value. |
 | The bot is silent | Confirm `enabled = true`, confirm an enabled agent owns `telegram.<alias>`, run `zeroclaw channel doctor`, then inspect logs. |
 | `Telegram polling conflict (409)` | More than one process is using the same bot token. Stop the duplicate daemon or channel process. |
-| Group messages are ignored | With `mention_only = true`, mention the bot or reply directly to one of its messages. Direct messages are still processed. |
+| Group messages are ignored | Check that the group `chat.id` is in `allowed_groups` when that list is non-empty; with `mention_only = true`, mention the bot or reply directly to one of its messages. Direct messages retain peer authorization. |
 | Draft edits report `Too Many Requests` | Increase `channels.telegram.<alias>.draft_update_interval_ms` or disable streaming. |
 
 The full Telegram field list is generated from the live configuration schema:

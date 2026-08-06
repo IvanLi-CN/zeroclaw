@@ -13787,6 +13787,13 @@ pub struct TelegramConfig {
     #[tab(Behavior)]
     #[serde(default)]
     pub mention_only: bool,
+    /// Exact numeric Telegram chat IDs permitted to use this alias from group
+    /// or supergroup chats. An empty list preserves the existing group
+    /// behavior for upgrade compatibility; direct-message authorization stays
+    /// owned by peer groups.
+    #[tab(Behavior)]
+    #[serde(default)]
+    pub allowed_groups: Vec<i64>,
     /// Override for the top-level `ack_reactions` setting. When `None`, the
     /// channel falls back to `[channels].ack_reactions`. When set
     /// explicitly, it takes precedence.
@@ -13832,6 +13839,7 @@ impl Default for TelegramConfig {
             draft_update_interval_ms: default_draft_update_interval_ms(),
             interrupt_on_new_message: false,
             mention_only: false,
+            allowed_groups: Vec::new(),
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: default_telegram_approval_timeout_secs(),
@@ -25734,6 +25742,7 @@ auto_save = true
                         debounce_ms: None,
                         interrupt_on_new_message: false,
                         mention_only: false,
+                        allowed_groups: Vec::new(),
                         ack_reactions: None,
                         proxy_url: None,
                         approval_timeout_secs: default_telegram_approval_timeout_secs(),
@@ -27180,6 +27189,7 @@ default_temperature = 0.7
             draft_update_interval_ms: 500,
             interrupt_on_new_message: true,
             mention_only: false,
+            allowed_groups: vec![-100_200_300],
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
@@ -27194,6 +27204,7 @@ default_temperature = 0.7
         assert_eq!(parsed.stream_mode, StreamMode::Partial);
         assert_eq!(parsed.draft_update_interval_ms, 500);
         assert!(parsed.interrupt_on_new_message);
+        assert_eq!(parsed.allowed_groups, vec![-100_200_300]);
     }
 
     #[test]
@@ -27204,6 +27215,7 @@ default_temperature = 0.7
         assert_eq!(parsed.draft_update_interval_ms, 1000);
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.api_base_url, "https://api.telegram.org");
+        assert!(parsed.allowed_groups.is_empty());
     }
 
     #[test]
@@ -31814,6 +31826,7 @@ high_entropy_tokens = false
                 draft_update_interval_ms: default_draft_update_interval_ms(),
                 interrupt_on_new_message: false,
                 mention_only: false,
+                allowed_groups: Vec::new(),
                 ack_reactions: None,
                 proxy_url: None,
                 approval_timeout_secs: default_telegram_approval_timeout_secs(),
@@ -38346,6 +38359,7 @@ model_provider = \"ollama.default\"
             }),
             PropKind::AliasRef
             | PropKind::StringArray
+            | PropKind::IntegerArray
             | PropKind::ObjectArray
             | PropKind::Object => None,
         }

@@ -558,6 +558,9 @@ pub struct TelegramChannel {
     /// Resolves inbound external peers from canonical state at message-time.
     /// No cache (see AGENTS.md "ABSOLUTE RULE — SINGLE SOURCE OF TRUTH").
     peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Resolves this alias's permitted group IDs from canonical config at
+    /// message-time. No cache: reloads must apply the current policy.
+    allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync>,
     persist: Option<Arc<RwLock<Config>>>,
     pairing: Option<PairingGuard>,
     client: reqwest::Client,
@@ -656,6 +659,7 @@ impl TelegramChannel {
             bot_token,
             alias,
             peer_resolver,
+            allowed_groups_resolver: Arc::new(Vec::new) as Arc<dyn Fn() -> Vec<i64> + Send + Sync>,
             persist: None,
             pairing,
             client: reqwest::Client::new(),
@@ -689,6 +693,16 @@ impl TelegramChannel {
         voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     ) -> Self {
         self.voice_peer_resolver = voice_peer_resolver;
+        self
+    }
+
+    /// Set the resolver used to read this alias's group authorization policy
+    /// live from configuration instead of retaining a policy snapshot.
+    pub fn with_allowed_groups_resolver(
+        mut self,
+        allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync>,
+    ) -> Self {
+        self.allowed_groups_resolver = allowed_groups_resolver;
         self
     }
 
@@ -1524,6 +1538,28 @@ impl TelegramChannel {
             .unwrap_or(false)
     }
 
+    /// Returns a group allowlist decision only when this alias has enabled the
+    /// group policy. `None` preserves legacy peer authorization for direct
+    /// messages and groups while the list is empty.
+    fn group_allowlist_authorization(&self, message: &serde_json::Value) -> Option<bool> {
+        if !Self::is_group_message(message) {
+            return None;
+        }
+
+        let allowed_groups = (self.allowed_groups_resolver)();
+        if allowed_groups.is_empty() {
+            return None;
+        }
+
+        Some(
+            message
+                .get("chat")
+                .and_then(|chat| chat.get("id"))
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|chat_id| allowed_groups.contains(&chat_id)),
+        )
+    }
+
     /// Check whether `message` is a reply to a message sent by the bot
     /// itself. When true, the `mention_only` gate should be bypassed.
     fn is_reply_to_bot(message: &serde_json::Value, bot_id: i64) -> bool {
@@ -1578,6 +1614,19 @@ impl TelegramChannel {
         I: IntoIterator<Item = &'a str>,
     {
         identities.into_iter().any(|id| self.is_user_allowed(id))
+    }
+
+    fn is_message_authorized(&self, message: &serde_json::Value) -> bool {
+        if let Some(group_allowed) = self.group_allowlist_authorization(message) {
+            return group_allowed;
+        }
+
+        let (username, sender_id, _) = Self::extract_sender_info(message);
+        let mut identities = vec![username.as_str()];
+        if let Some(id) = sender_id.as_deref() {
+            identities.push(id);
+        }
+        self.is_any_user_allowed(identities.iter().copied())
     }
 
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
@@ -1863,6 +1912,9 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         update: &serde_json::Value,
     ) -> Option<ChannelMessage> {
         let message = update.get("message")?;
+        if self.group_allowlist_authorization(message) == Some(false) {
+            return None;
+        }
         let attachment = Self::parse_attachment_metadata(message)?;
 
         // Check file size limit
@@ -1880,16 +1932,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
-        let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
-
-        let mut identities = vec![username.as_str()];
-        if let Some(id) = sender_id.as_deref() {
-            identities.push(id);
-        }
-
-        if !self.is_any_user_allowed(identities.iter().copied()) {
+        if !self.is_message_authorized(message) {
             return None;
         }
+
+        let (_, _, sender_identity) = Self::extract_sender_info(message);
 
         // Apply mention_only gate before downloading. Photo / document
         // updates carry no `text` field, so the text-only gate in
@@ -2042,9 +2089,12 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// Returns `None` if the message is not a voice message, transcription is disabled,
     /// or the message exceeds duration limits.
     async fn try_parse_voice_message(&self, update: &serde_json::Value) -> Option<ChannelMessage> {
+        let message = update.get("message")?;
+        if self.group_allowlist_authorization(message) == Some(false) {
+            return None;
+        }
         let config = self.transcription.as_ref()?;
         let manager = self.transcription_manager.as_deref()?;
-        let message = update.get("message")?;
 
         let (file_id, duration) = Self::parse_voice_metadata(message)?;
 
@@ -2060,16 +2110,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
-        let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
-
-        let mut identities = vec![username.as_str()];
-        if let Some(id) = sender_id.as_deref() {
-            identities.push(id);
-        }
-
-        if !self.is_any_user_allowed(identities.iter().copied()) {
+        if !self.is_message_authorized(message) {
             return None;
         }
+
+        let (_, _, sender_identity) = Self::extract_sender_info(message);
 
         let voice_caption = message.get("caption").and_then(serde_json::Value::as_str);
         self.check_media_mention_gate(message, voice_caption)?;
@@ -2373,16 +2418,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
         let text = message.get("text").and_then(serde_json::Value::as_str)?;
 
-        let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
-
-        let mut identities = vec![username.as_str()];
-        if let Some(id) = sender_id.as_deref() {
-            identities.push(id);
-        }
-
-        if !self.is_any_user_allowed(identities.iter().copied()) {
+        if !self.is_message_authorized(message) {
             return None;
         }
+
+        let (_, _, sender_identity) = Self::extract_sender_info(message);
 
         let is_group = Self::is_group_message(message);
         if self.mention_only && is_group {
@@ -4059,6 +4099,12 @@ Ensure only one `zeroclaw` process is using this bot token."
                         }
 
                         continue; // callback_query is not a regular message
+                    }
+
+                    if let Some(message) = update.get("message")
+                        && self.group_allowlist_authorization(message) == Some(false)
+                    {
+                        continue;
                     }
 
                     let msg = if let Some(m) = self.parse_update_message(update) {
@@ -6408,6 +6454,238 @@ mod tests {
             msg["caption"] = serde_json::Value::String(c.to_string());
         }
         msg
+    }
+
+    fn group_text_update(chat_id: i64, sender: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": text,
+                "from": { "id": 7, "username": sender },
+                "chat": { "id": chat_id, "type": "supergroup" }
+            }
+        })
+    }
+
+    #[test]
+    fn allowed_group_members_bypass_peer_auth_without_authorizing_direct_messages() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "home",
+            Arc::new(|| vec!["approved-dm".into()]),
+            false,
+        )
+        .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]));
+
+        let allowed_group = group_text_update(-100_200_300, "group-member", "hello");
+        assert!(
+            ch.parse_update_message(&allowed_group).is_some(),
+            "every member of an allowed group reaches normal dispatch"
+        );
+
+        let unlisted_group = group_text_update(-100_200_301, "group-member", "hello");
+        assert!(ch.parse_update_message(&unlisted_group).is_none());
+
+        let unapproved_dm = serde_json::json!({
+            "message": {
+                "message_id": 2,
+                "text": "hello",
+                "from": { "id": 7, "username": "group-member" },
+                "chat": { "id": 7, "type": "private" }
+            }
+        });
+        assert!(
+            ch.parse_update_message(&unapproved_dm).is_none(),
+            "group authorization must not authorize the sender's direct messages"
+        );
+
+        let approved_dm = serde_json::json!({
+            "message": {
+                "message_id": 3,
+                "text": "hello",
+                "from": { "id": 8, "username": "approved-dm" },
+                "chat": { "id": 8, "type": "private" }
+            }
+        });
+        assert!(ch.parse_update_message(&approved_dm).is_some());
+    }
+
+    #[test]
+    fn empty_allowed_groups_preserve_existing_group_peer_authorization() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "home",
+            Arc::new(|| vec!["approved-member".into()]),
+            false,
+        )
+        .with_allowed_groups_resolver(Arc::new(Vec::new));
+
+        let approved = group_text_update(-100_200_300, "approved-member", "hello");
+        assert!(ch.parse_update_message(&approved).is_some());
+
+        let unapproved = group_text_update(-100_200_300, "unapproved-member", "hello");
+        assert!(ch.parse_update_message(&unapproved).is_none());
+    }
+
+    #[test]
+    fn mention_only_runs_after_group_authorization() {
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(Vec::new), true)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]));
+        *ch.bot_username.lock() = Some("mybot".to_string());
+
+        let allowed_without_mention = group_text_update(-100_200_300, "member", "hello");
+        assert!(ch.parse_update_message(&allowed_without_mention).is_none());
+
+        let unlisted_with_mention = group_text_update(-100_200_301, "member", "@mybot hello");
+        assert!(ch.parse_update_message(&unlisted_with_mention).is_none());
+    }
+
+    #[tokio::test]
+    async fn unlisted_group_attachment_skips_telegram_download_requests() {
+        use wiremock::MockServer;
+
+        let mock_server = MockServer::start().await;
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(|| vec!["*".into()]), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_api_base(mock_server.uri())
+            .with_workspace_dir(workspace.path().to_path_buf());
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 4,
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" },
+                "document": { "file_id": "document-file", "file_name": "report.txt" }
+            }
+        });
+
+        assert!(ch.try_parse_attachment_message(&update).await.is_none());
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unlisted_group_voice_skips_telegram_download_requests() {
+        use wiremock::MockServer;
+
+        let mock_server = MockServer::start().await;
+        let transcription = zeroclaw_config::schema::TranscriptionConfig {
+            enabled: true,
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(|| vec!["*".into()]), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_api_base(mock_server.uri())
+            .with_transcription(transcription);
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 5,
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" },
+                "voice": { "file_id": "voice-file", "duration": 4 }
+            }
+        });
+
+        assert!(ch.try_parse_voice_message(&update).await.is_none());
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unlisted_group_listener_skips_pairing_ack_typing_and_dispatch() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(Vec::new), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_ack_reactions(true)
+            .with_api_base(mock_server.uri());
+        let pairing_code = ch
+            .pairing
+            .as_ref()
+            .and_then(PairingGuard::pairing_code)
+            .expect("channel without peers starts pairing");
+        let update = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 6,
+                "text": format!("/bind {pairing_code}"),
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" }
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 0,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [] })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 30,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [update] })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let listener = ch.listen(tx);
+        tokio::pin!(listener);
+        tokio::select! {
+            result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let requests = mock_server.received_requests().await.unwrap();
+                    if requests.iter().any(|request| {
+                        let body = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+                        request.url.path() == "/bottoken/getUpdates"
+                            && body.as_ref().and_then(|body| body.get("timeout"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(30)
+                            && body.as_ref().and_then(|body| body.get("offset"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(2)
+                    }) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => match result {
+                Ok(()) => {}
+                Err(_) => panic!(
+                    "listener did not advance past the unlisted group: {:?}",
+                    mock_server.received_requests().await.unwrap()
+                ),
+            }
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "unlisted group must not reach dispatch"
+        );
+        let requests = mock_server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|request| {
+            !matches!(
+                request.url.path(),
+                "/bottoken/sendMessage"
+                    | "/bottoken/setMessageReaction"
+                    | "/bottoken/sendChatAction"
+            )
+        }));
     }
 
     #[test]

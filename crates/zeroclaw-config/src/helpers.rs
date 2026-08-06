@@ -521,6 +521,39 @@ fn parse_prop_value(value_str: &str, kind: PropKind) -> anyhow::Result<toml::Val
                 .collect();
             Ok(toml::Value::Array(items))
         }
+        PropKind::IntegerArray => {
+            let trimmed = value_str.trim();
+            if trimmed.starts_with('[') {
+                let values = serde_json::from_str::<Vec<i64>>(trimmed).map_err(|e| {
+                    reject(
+                        "integer_array",
+                        ::serde_json::json!({"kind": "integer_array", "error": format!("{}", e)}),
+                    );
+                    anyhow::Error::msg(format!("invalid JSON array of integers: {e}"))
+                })?;
+                return Ok(toml::Value::Array(
+                    values.into_iter().map(toml::Value::Integer).collect(),
+                ));
+            }
+
+            let values = value_str
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != crate::traits::UNSET_DISPLAY)
+                .map(|value| {
+                    value.parse::<i64>().map_err(|_| {
+                        reject(
+                            "integer_array",
+                            ::serde_json::json!({"kind": "integer_array", "got_len": value.len()}),
+                        );
+                        anyhow::Error::msg(format!("Invalid integer array value '{value}'"))
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(toml::Value::Array(
+                values.into_iter().map(toml::Value::Integer).collect(),
+            ))
+        }
         // `Vec<T>` of structs: round-trip a JSON array of objects to a
         // TOML array. JSON `null` (used by serde for `Option::None`) is
         // dropped because TOML has no null - the absent key conveys the
@@ -927,6 +960,24 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0].as_str(), Some("tok1"));
         assert_eq!(arr[1].as_str(), Some(r#"p@ss"word"#));
+    }
+
+    #[test]
+    fn parse_integer_array_accepts_json_and_comma_separated_values() {
+        let json = parse_prop_value("[-100200300, 42]", PropKind::IntegerArray).unwrap();
+        let comma_separated = parse_prop_value("-100200300, 42", PropKind::IntegerArray).unwrap();
+
+        assert_eq!(json, comma_separated);
+        assert_eq!(
+            json.as_array().unwrap(),
+            &[toml::Value::Integer(-100200300), toml::Value::Integer(42)]
+        );
+    }
+
+    #[test]
+    fn parse_integer_array_rejects_non_integers() {
+        assert!(parse_prop_value("-100200300, nope", PropKind::IntegerArray).is_err());
+        assert!(parse_prop_value("[-100200300, 1.5]", PropKind::IntegerArray).is_err());
     }
 
     // ── validate_alias_key ────────────────────────────────────────────────

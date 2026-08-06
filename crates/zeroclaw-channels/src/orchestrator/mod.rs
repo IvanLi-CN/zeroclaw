@@ -7419,6 +7419,19 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
             };
+            let allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync> = {
+                let cfg_arc = config_arc.clone();
+                let alias = alias.clone();
+                Arc::new(move || {
+                    cfg_arc
+                        .read()
+                        .channels
+                        .telegram
+                        .get(&alias)
+                        .map(|tg| tg.allowed_groups.clone())
+                        .unwrap_or_default()
+                })
+            };
             let workspace_dir = one_shot_channel_workspace_dir(&config, "telegram", &alias);
             let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
                 let cfg_arc = config_arc.clone();
@@ -7432,6 +7445,7 @@ fn build_channel_by_id(
                     peer_resolver,
                     tg.mention_only,
                 )
+                .with_allowed_groups_resolver(allowed_groups_resolver)
                 .with_voice_peer_resolver(voice_peer_resolver)
                 .with_persistence(config_arc.clone())
                 .with_api_base(tg.api_base_url.clone())
@@ -8572,6 +8586,19 @@ fn collect_configured_channels(
             let alias = alias.clone();
             Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
         };
+        let allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync> = {
+            let cfg_arc = config_arc.clone();
+            let alias = alias.clone();
+            Arc::new(move || {
+                cfg_arc
+                    .read()
+                    .channels
+                    .telegram
+                    .get(&alias)
+                    .map(|tg| tg.allowed_groups.clone())
+                    .unwrap_or_default()
+            })
+        };
         let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
             let cfg_arc = config_arc.clone();
             let alias = alias.clone();
@@ -8602,6 +8629,7 @@ fn collect_configured_channels(
                         peer_resolver,
                         tg.mention_only,
                     )
+                    .with_allowed_groups_resolver(allowed_groups_resolver)
                     .with_voice_peer_resolver(voice_peer_resolver)
                     .with_persistence(config_arc.clone())
                     .with_api_base(tg.api_base_url.clone())
@@ -27295,6 +27323,7 @@ This is an example JSON object for profile settings."#;
                 draft_update_interval_ms: 1000,
                 interrupt_on_new_message: false,
                 mention_only: false,
+                allowed_groups: vec![],
                 ack_reactions: None,
                 proxy_url: None,
                 approval_timeout_secs: 120,
@@ -27324,6 +27353,7 @@ This is an example JSON object for profile settings."#;
                 draft_update_interval_ms: 1000,
                 interrupt_on_new_message: false,
                 mention_only: false,
+                allowed_groups: vec![],
                 ack_reactions: None,
                 proxy_url: None,
                 approval_timeout_secs: 120,

@@ -464,7 +464,7 @@ export interface ListResponseEntry {
   category: string;
   /**
    * Stable kind tag from the gateway: 'string' | 'bool' | 'integer' | 'float'
-   * | 'enum' | 'string-array'. Use this — not value-sniffing — to choose the
+   * | 'enum' | 'string-array' | 'integer-array'. Use this — not value-sniffing — to choose the
    * right input renderer.
    */
   kind: string;
@@ -1674,6 +1674,7 @@ export type QuickstartFieldKind =
   | "float"
   | "enum"
   | "string_array"
+  | "integer_array"
   | "object_array"
   | "object"
   | "duration"
