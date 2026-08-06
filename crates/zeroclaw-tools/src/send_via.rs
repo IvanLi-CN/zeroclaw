@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(out["status"], "rejected");
         assert_eq!(
             out["reason"],
-            "A target is required when body is present outside an active Telegram turn."
+            "at least one of `target` or `modality` is required when `body` is absent"
         );
         assert!(routing.lock().unwrap().is_empty());
     }
