@@ -85,6 +85,8 @@ jobs:
 
       - name: Guard release attestation contract
         run: python3 scripts/ci/release_attestation_contract_test.py
+      - name: Test required gate aggregation
+        run: bash scripts/ci/required_gate.test.sh
 
   # ── Post-format required quality gate ─────────────────────────────────────
 
@@ -875,8 +877,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+          if jq -e '
+            [to_entries[] | .value.result | select(. == "failure" or . == "cancelled")]
+            | length > 0
+          ' <<<"$NEEDS_JSON" >/dev/null; then
             echo "::error::One or more CI jobs failed or were cancelled"
             exit 1
           fi
