@@ -879,11 +879,4 @@ jobs:
       - name: Check results
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: |
-          if jq -e '
-            [to_entries[] | .value.result | select(. == "failure" or . == "cancelled")]
-            | length > 0
-          ' <<<"$NEEDS_JSON" >/dev/null; then
-            echo "::error::One or more CI jobs failed or were cancelled"
-            exit 1
-          fi
+        run: bash scripts/ci/required_gate.sh
