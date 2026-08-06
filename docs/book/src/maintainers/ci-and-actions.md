@@ -6,7 +6,10 @@ Every workflow lives in `.github/workflows/`. The sections below group them by t
 
 ### Quality Gate (`ci.yml`)
 
-Fires on every PR targeting `master` and on trusted pushes to `master`.
+Fires on every PR targeting `master` or the temporary Initiative integration
+branches under `prd/**`, and on trusted pushes to `master`. Ordinary
+contributor PRs still target `master` directly; `prd/**` exists only for the
+approved Initiative child-PR workflow and is not a general development branch.
 Composite job with multiple matrix legs:
 
 - **fmt**: `cargo fmt --all -- --check`
