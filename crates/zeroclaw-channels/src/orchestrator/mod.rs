@@ -3252,6 +3252,13 @@ fn parse_reply_intent(response: &str) -> AssistantChannelOutcome {
         ("NO_REPLY[REFUSE]:", NoReplyKind::Refused),
         ("NO_REPLY[FAIL]:", NoReplyKind::Failed),
     ] {
+        let bare_tag = tag.strip_suffix(':').unwrap_or(tag);
+        if trimmed.eq_ignore_ascii_case(bare_tag) {
+            return AssistantChannelOutcome::NoReply {
+                kind: *kind,
+                reason: None,
+            };
+        }
         if let Some(reason) = trimmed.strip_prefix(tag) {
             return outcome_for_no_reply(reason.trim(), *kind);
         }
@@ -5436,11 +5443,11 @@ async fn process_channel_message_body(
     // This context holds the one-turn successful-send quota and the reply target;
     // tool registration itself remains global so live configuration can take effect.
     let telegram_sticker_context = (msg.channel == "telegram")
-        .then(|| msg.channel_alias.as_deref())
+        .then_some(msg.channel_alias.as_deref())
         .flatten()
         .map(|alias| tools::TelegramStickerTurnContext::new(alias, msg.reply_target.clone()));
     let telegram_immediate_delivery_context = (msg.channel == "telegram")
-        .then(|| target_channel.as_ref())
+        .then_some(target_channel.as_ref())
         .flatten()
         .map(|channel| {
             tools::ImmediateDeliveryContext::new(
@@ -13460,6 +13467,7 @@ api_key = "anthropic-key"
 
     #[test]
     fn sticker_only_reply_suppression_requires_success_and_info_marker() {
+        assert!(should_suppress_sticker_only_reply(1, "NO_REPLY[INFO]"));
         assert!(should_suppress_sticker_only_reply(
             1,
             "NO_REPLY[INFO]: sticker sent"
@@ -13476,6 +13484,10 @@ api_key = "anthropic-key"
         assert_eq!(
             sticker_only_reply_history_marker(1, "NO_REPLY[INFO]: sticker sent"),
             Some("[No reply sent: sticker sent]".into())
+        );
+        assert_eq!(
+            sticker_only_reply_history_marker(1, "NO_REPLY[INFO]"),
+            Some("[No reply sent]".into())
         );
         assert_eq!(sticker_only_reply_history_marker(0, "NO_REPLY[INFO]"), None);
     }
