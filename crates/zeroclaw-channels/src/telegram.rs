@@ -6340,7 +6340,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path_regex(r"/bot[^/]+/getUpdates$"))
-            .and(body_json(&serde_json::json!({
+            .and(body_json(serde_json::json!({
                 "offset": 0,
                 "timeout": 0,
                 "allowed_updates": ["message", "callback_query"]
@@ -6353,7 +6353,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path_regex(r"/bot[^/]+/getUpdates$"))
-            .and(body_json(&serde_json::json!({
+            .and(body_json(serde_json::json!({
                 "offset": 0,
                 "timeout": 30,
                 "allowed_updates": ["message", "callback_query"]
