@@ -449,6 +449,13 @@ pub fn should_execute_tools_in_parallel(
         return false;
     }
 
+    if batch_requires_sticker_delivery_order(tool_calls) {
+        // An immediate target-less send_via is delivery to the active Telegram
+        // turn. Keep it in model-call order with sticker so text-before/text-after
+        // responses cannot be reordered by concurrent execution.
+        return false;
+    }
+
     if let Some(mgr) = approval
         && tool_calls.iter().any(|call| mgr.needs_approval(&call.name))
     {
@@ -458,6 +465,25 @@ pub fn should_execute_tools_in_parallel(
     }
 
     true
+}
+
+fn batch_requires_sticker_delivery_order(tool_calls: &[ParsedToolCall]) -> bool {
+    let contains_sticker = tool_calls.iter().any(|call| call.name == "sticker");
+    let contains_active_turn_send_via = tool_calls.iter().any(|call| {
+        call.name == "send_via"
+            && call
+                .arguments
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|body| !body.trim().is_empty())
+            && call
+                .arguments
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|target| target.trim().is_empty())
+    });
+
+    contains_sticker && contains_active_turn_send_via
 }
 
 // ── Parallel execution ───────────────────────────────────────────────────
@@ -789,6 +815,43 @@ mod tests {
         assert!(
             should_execute_tools_in_parallel(&calls, None),
             "non-tool_search, non-approval batch must remain parallel-eligible (default branch)"
+        );
+    }
+
+    #[test]
+    fn sticker_and_active_turn_text_send_force_serial_execution() {
+        let calls = vec![
+            ParsedToolCall {
+                name: "send_via".to_string(),
+                arguments: serde_json::json!({ "body": "Text before the sticker" }),
+                tool_call_id: None,
+            },
+            parsed_tool_call("sticker"),
+        ];
+
+        assert!(
+            !should_execute_tools_in_parallel(&calls, None),
+            "active-turn text delivery and sticker calls must preserve model-call order"
+        );
+    }
+
+    #[test]
+    fn sticker_and_targeted_fanout_remain_parallel_eligible() {
+        let calls = vec![
+            ParsedToolCall {
+                name: "send_via".to_string(),
+                arguments: serde_json::json!({
+                    "target": "email.default",
+                    "body": "Independent fanout"
+                }),
+                tool_call_id: None,
+            },
+            parsed_tool_call("sticker"),
+        ];
+
+        assert!(
+            should_execute_tools_in_parallel(&calls, None),
+            "targeted fanout does not share the active Telegram delivery route"
         );
     }
 

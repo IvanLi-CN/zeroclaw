@@ -15,7 +15,7 @@
 | --- | --- | --- | --- |
 | Telegram group authorization | wave-gated | Delivered | Alias allowlist and early inbound gate |
 | Telegram reaction parity | low | Delivered | Add/remove API implementation and ID parsing |
-| Telegram sticker tool | wave-gated | Delivered | Shared config, typed tool, lookup/cache/quota |
+| Telegram sticker tool | wave-gated | Delivered | Shared config, typed Act tool, proxy-aware lookup/cache/quota, active-turn text-before-sticker, and sticker-only turn completion |
 
 ## Remaining Gaps
 
@@ -24,7 +24,8 @@
 ## Related Changes
 
 - Telegram channel adapter, runtime tool registry, configuration schema, and
-  Telegram/tool documentation.
+  Telegram/tool documentation. Sticker-only completion persists the tool turn,
+  reconciles acknowledgement reactions, and suppresses empty text output.
 
 ## References
 

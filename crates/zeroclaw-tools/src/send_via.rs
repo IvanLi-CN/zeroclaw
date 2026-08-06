@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::multi_agent::OutputModality;
@@ -17,6 +17,18 @@ pub type PerToolChannelHandle = Arc<parking_lot::RwLock<HashMap<String, Arc<dyn 
 /// at call time so a config reload (membership / `external_peers` / channel alias /
 /// `output_modality`) takes effect without rebuilding the tool registry.
 pub type AgentPeerGroupResolver = Arc<dyn Fn() -> HashMap<String, PeerGroupConfig> + Send + Sync>;
+
+const TOOL_DESCRIPTION_KEY: &str = "tool-send-via-description";
+const TARGET_PARAMETER_KEY: &str = "tool-send-via-param-target";
+const MODALITY_PARAMETER_KEY: &str = "tool-send-via-param-modality";
+const BODY_PARAMETER_KEY: &str = "tool-send-via-param-body";
+const BODY_TARGET_REQUIRED_KEY: &str = "tool-send-via-error-body-target-required";
+
+static TOOL_DESCRIPTION: OnceLock<String> = OnceLock::new();
+
+fn tool_string(key: &str) -> String {
+    crate::i18n::get_required_tool_string(key)
+}
 
 tokio::task_local! {
     pub static TURN_ROUTING: Option<TurnRoutingHandle>;
@@ -207,29 +219,9 @@ impl Tool for SendViaTool {
     }
 
     fn description(&self) -> &str {
-        "Control where and how this turn's reply is delivered, or send an extra message \
-         to another channel.\n\
-         \n\
-         WHEN TO USE: call this tool at the start of your response whenever the user requests \
-         a specific reply format or destination — e.g. \"reply by text\", \"send as voice\", \
-         \"text only\", \"send to my email\", \"redirect to Discord\". Do not wait for the user \
-         to name the tool; infer intent from natural language just as you would use a weather \
-         tool when asked for the weather.\n\
-         \n\
-         Without `body` (routing instruction — affects this turn's main reply):\n\
-         - `send_via(modality: \"text\")` — reply by text even on a voice-only peer\n\
-         - `send_via(modality: \"voice\")` — reply by voice even on a text-only peer\n\
-         - `send_via(target: \"discord.main\")` — redirect reply to another channel\n\
-         - `send_via(target: \"discord.main\", modality: \"voice\")` — redirect + force modality\n\
-         At least one of `target` or `modality` is required when `body` is absent.\n\
-         \n\
-         With `body` (immediate fanout — main reply still goes to originating channel):\n\
-         - `send_via(target: \"email.default\", body: \"...\")` — send separate content elsewhere\n\
-         - In an active Telegram turn, omit target to send text to the current chat before a sticker.\n\
-         A target is required when body is present outside an active Telegram turn.\n\
-         \n\
-         `target` must be a channel alias (e.g. `telegram.default`) or a peer group name \
-         the active agent belongs to. `modality` defaults to the peer group's output_modality."
+        TOOL_DESCRIPTION
+            .get_or_init(|| tool_string(TOOL_DESCRIPTION_KEY))
+            .as_str()
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -238,19 +230,16 @@ impl Tool for SendViaTool {
             "properties": {
                 "target": {
                     "type": "string",
-                    "description": "Channel alias (e.g. telegram.default) or peer group name. \
-                                    Required when body is present except in an active Telegram turn. \
-                                    Optional otherwise (omit = same channel)."
+                    "description": tool_string(TARGET_PARAMETER_KEY)
                 },
                 "modality": {
                     "type": "string",
                     "enum": ["text", "voice"],
-                    "description": "Delivery modality. Omit to inherit from the peer group's output_modality."
+                    "description": tool_string(MODALITY_PARAMETER_KEY)
                 },
                 "body": {
                     "type": "string",
-                    "description": "Message content for an immediate fanout send. \
-                                    Omit to set a routing instruction for the current reply instead."
+                    "description": tool_string(BODY_PARAMETER_KEY)
                 }
             }
         })
@@ -302,7 +291,7 @@ impl Tool for SendViaTool {
                         success: false,
                         output: ToolOutput::json(json!({
                             "status": "rejected",
-                            "reason": "a target is required when body is present outside an active Telegram turn"
+                            "reason": tool_string(BODY_TARGET_REQUIRED_KEY)
                         })),
                         error: None,
                     });
@@ -760,6 +749,10 @@ mod tests {
         assert!(!result.success);
         let out: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(out["status"], "rejected");
+        assert_eq!(
+            out["reason"],
+            "A target is required when body is present outside an active Telegram turn."
+        );
         assert!(routing.lock().unwrap().is_empty());
     }
 
