@@ -2,7 +2,9 @@ name: Quality Gate
 
 on:
   pull_request:
-    branches: [master]
+    branches:
+      - master
+      - "prd/**"
   push:
     branches: [master]
   # Merge queue: GitHub builds a temporary `gh-readonly-queue/master/…` branch
@@ -778,7 +780,13 @@ jobs:
           fetch-depth: 0
       - name: Resolve base SHA
         id: base
-        run: echo "sha=$(git merge-base origin/master HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="$(git merge-base origin/master HEAD)"
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
       - name: Docs quality gate (markdown lint + em-dash prose check)
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
@@ -801,7 +809,7 @@ jobs:
         id: changed
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="$(git merge-base origin/master HEAD)"
+            base="${{ github.event.pull_request.base.sha }}"
             if git diff --name-only "$base" HEAD | grep -q '^apps/zerocode/'; then
               echo "run=true" >> "$GITHUB_OUTPUT"
             else
