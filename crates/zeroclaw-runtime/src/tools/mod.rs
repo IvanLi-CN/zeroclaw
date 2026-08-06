@@ -109,6 +109,10 @@ pub use zeroclaw_tools::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
 };
+pub use zeroclaw_tools::telegram_sticker::{
+    TURN_TELEGRAM_STICKER_CONTEXT, TelegramStickerConfig, TelegramStickerConfigResolver,
+    TelegramStickerTool, TelegramStickerTurnContext,
+};
 pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
 pub use zeroclaw_tools::weather_tool::WeatherTool;
@@ -1244,6 +1248,38 @@ pub fn all_tools_with_runtime(
     let reaction_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
     let reaction_tool = ReactionTool::new(security.clone(), Arc::clone(&reaction_handle));
     tool_arcs.push(Arc::new(reaction_tool));
+
+    // Telegram sticker configuration has a global list of packs but alias-scoped
+    // credentials. Resolve both at invocation time so config reloads take effect
+    // without retaining a second source of truth in the tool registry.
+    {
+        let telegram_sticker_config: TelegramStickerConfigResolver =
+            if let Some(live) = live_config.clone() {
+                Arc::new(move |alias| {
+                    let config = live.read();
+                    let telegram = config.channels.telegram.get(alias)?;
+                    Some(TelegramStickerConfig {
+                        bot_token: telegram.bot_token.clone(),
+                        api_base_url: telegram.api_base_url.clone(),
+                        sticker_sets: config.channels.telegram_sticker_sets.clone(),
+                    })
+                })
+            } else {
+                let channels = root_config.channels.clone();
+                Arc::new(move |alias| {
+                    let telegram = channels.telegram.get(alias)?;
+                    Some(TelegramStickerConfig {
+                        bot_token: telegram.bot_token.clone(),
+                        api_base_url: telegram.api_base_url.clone(),
+                        sticker_sets: channels.telegram_sticker_sets.clone(),
+                    })
+                })
+            };
+        tool_arcs.push(Arc::new(TelegramStickerTool::new(
+            security.clone(),
+            telegram_sticker_config,
+        )));
+    }
 
     // Unified forge operations tool, routes through the git channel via the
     // same late-bound channel map as the reaction tool. Resource/action grid
@@ -2439,6 +2475,7 @@ mod tests {
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
+        assert!(names.contains(&"sticker"));
     }
 
     #[test]

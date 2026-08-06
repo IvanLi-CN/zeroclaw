@@ -3780,6 +3780,20 @@ fn ensure_nonempty_channel_reply(
     EMPTY_CHANNEL_REPLY_FALLBACK.to_string()
 }
 
+/// A successful sticker is visible output already. Preserve an intentional
+/// informational no-reply marker so the normal empty-text guard does not send
+/// an unrelated fallback message after a sticker-only Telegram response.
+fn should_suppress_sticker_only_reply(successful_sticker_sends: usize, response: &str) -> bool {
+    successful_sticker_sends > 0
+        && matches!(
+            parse_reply_intent(response),
+            AssistantChannelOutcome::NoReply {
+                kind: NoReplyKind::Informational,
+                ..
+            }
+        )
+}
+
 /// Remove leading lines that narrate tool usage (e.g. "Let me check the weather for you.").
 /// Only strips lines from the very beginning of the message that match common
 /// narration patterns, so genuine content is preserved.
@@ -5410,6 +5424,13 @@ async fn process_channel_message_body(
     // handle) keeps concurrent same-agent turns from reading each other's routes.
     let turn_routing: tools::TurnRoutingHandle =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // The sticker tool is only usable while handling an actual Telegram turn.
+    // This context holds the one-turn successful-send quota and the reply target;
+    // tool registration itself remains global so live configuration can take effect.
+    let telegram_sticker_context = (msg.channel == "telegram")
+        .then(|| msg.channel_alias.as_deref())
+        .flatten()
+        .map(|alias| tools::TelegramStickerTurnContext::new(alias, msg.reply_target.clone()));
 
     let tool_receipts_collector: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -5537,6 +5558,8 @@ async fn process_channel_message_body(
             // which share one SendViaTool, never read each other's routes.
             let tool_loop =
                 tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
+            let tool_loop = tools::TURN_TELEGRAM_STICKER_CONTEXT
+                .scope(telegram_sticker_context.clone(), tool_loop);
             let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
                 .scope(thinking.params.native_thinking, tool_loop);
             let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
@@ -5760,6 +5783,21 @@ async fn process_channel_message_body(
             }
         }
         LlmExecutionResult::Completed(Ok(Ok(response))) => {
+            let successful_sticker_sends = match telegram_sticker_context.as_ref() {
+                Some(context) => context.successful_sends().await,
+                None => 0,
+            };
+            if should_suppress_sticker_only_reply(successful_sticker_sends, &response) {
+                // A sticker-only reply already has visible Telegram output. Do
+                // not replace the intentional informational no-reply marker with
+                // the generic empty-text fallback message.
+                if let (Some(channel), Some(draft_id)) =
+                    (target_channel.as_ref(), draft_message_id.as_deref())
+                {
+                    let _ = channel.cancel_draft(&msg.reply_target, draft_id).await;
+                }
+                return;
+            }
             // ── Hook: on_message_sending (modifying) ─────────
             let mut outbound_response = response;
             if let Some(hooks) = &ctx.hooks {
@@ -13375,6 +13413,23 @@ api_key = "anthropic-key"
             "15551234567@s.whatsapp.net",
         );
         assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn sticker_only_reply_suppression_requires_success_and_info_marker() {
+        assert!(should_suppress_sticker_only_reply(
+            1,
+            "NO_REPLY[INFO]: sticker sent"
+        ));
+        assert!(!should_suppress_sticker_only_reply(
+            0,
+            "NO_REPLY[INFO]: sticker sent"
+        ));
+        assert!(!should_suppress_sticker_only_reply(
+            1,
+            "NO_REPLY[FAIL]: sticker failed"
+        ));
+        assert!(!should_suppress_sticker_only_reply(1, "Thanks!"));
     }
 
     #[test]
