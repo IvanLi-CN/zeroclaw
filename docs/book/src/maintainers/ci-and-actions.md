@@ -106,7 +106,7 @@ Manual and weekly scheduled advisory lint coverage on macOS aarch64 and Windows 
 
 ### Release Stable (`release-stable-manual.yml`)
 
-Manual trigger for the full release pipeline. Builds all targets, creates the GitHub Release, pushes the prebuilt `latest`, versioned, and `debian` Docker images to GHCR, calls the generated Docker variant matrix at the release tag, triggers the website redeploy, and invokes the distribution sub-workflows (Scoop, AUR, Discord, tweet). Homebrew Core detects new releases through its own autobump service. Two environment gates require maintainer approval mid-run: `github-releases` (the `publish` job) and `docker`.
+Manual trigger for the fork's full release pipeline. Builds all targets, creates the GitHub Release, pushes the prebuilt `latest`, versioned, and `debian` Docker images to GHCR, calls the generated Docker variant matrix at the release tag, and deploys versioned documentation. Website redeploys, package-manager publication, social announcements, and crates.io publication are outside this workflow. Two environment gates require maintainer approval mid-run: `github-releases` (the `publish` job) and `docker`.
 
 Downloadable assets use GitHub-hosted Build Level 2 attestations. Offline
 bundles and trusted-root material ship inside one verification archive, and
@@ -117,7 +117,9 @@ See the [Release Runbook](./release-runbook.md) for the full procedure.
 
 ### Package Publishers
 
-Each fires on `workflow_dispatch` with a version input. They are also invoked from the release workflow after a successful publish.
+Each fires on `workflow_dispatch` with a version input. They are standalone
+upstream-oriented tools and are not invoked by this fork's stable release
+workflow.
 
 | Workflow | What it does |
 |---|---|
@@ -138,7 +140,6 @@ authoritative automation.
 | `DISCORD_WEBHOOK_URL` | `discord-release.yml` |
 | `TWITTER_ACCESS_TOKEN`, `TWITTER_ACCESS_TOKEN_SECRET`, `TWITTER_CONSUMER_API_KEY`, `TWITTER_CONSUMER_API_SECRET_KEY` | `tweet-release.yml` |
 | `SCOOP_BUCKET_TOKEN` | `pub-scoop.yml`; fine-grained PAT limited to `zeroclaw-labs/scoop-zeroclaw` with Contents read/write |
-| `WEBSITE_REPO_PAT` | `release-stable-manual.yml` (triggers the website repo redeploy) |
 | `GITHUB_TOKEN` (automatic) | All workflows that push commits, open PRs, or push images to GHCR |
 
 Docker images push to GHCR using the automatic `GITHUB_TOKEN`; there is no separate registry token. The release pipeline does not publish to crates.io, so no `CARGO_REGISTRY_TOKEN` is required.
@@ -233,8 +234,8 @@ Export the current effective policy:
 #### sh
 
 ```sh
-gh api repos/zeroclaw-labs/zeroclaw/actions/permissions
-gh api repos/zeroclaw-labs/zeroclaw/actions/permissions/selected-actions
+gh api repos/IvanLi-CN/zeroclaw/actions/permissions
+gh api repos/IvanLi-CN/zeroclaw/actions/permissions/selected-actions
 ```
 
 </div>
