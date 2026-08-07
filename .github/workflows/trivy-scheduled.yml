@@ -32,7 +32,7 @@ env:
 jobs:
   scan:
     name: Trivy (${{ matrix.stem }})
-    if: github.repository == 'zeroclaw-labs/zeroclaw'
+    if: github.repository == 'IvanLi-CN/zeroclaw'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

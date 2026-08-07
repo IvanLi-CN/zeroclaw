@@ -59,7 +59,7 @@ jobs:
       contents: read
       security-events: write
     if: |
-      github.repository == 'zeroclaw-labs/zeroclaw' &&
+      github.repository == 'IvanLi-CN/zeroclaw' &&
       github.ref == 'refs/heads/master' &&
       (github.event_name == 'push' || github.event_name == 'schedule')
     steps:

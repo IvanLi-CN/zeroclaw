@@ -80,11 +80,13 @@ This matrix supplements rather than replaces the stable release's prebuilt `late
 
 ### Discord Release (`discord-release.yml`)
 
-Fires after a successful stable release. Posts the release notes to the community Discord.
+Standalone manual or reusable workflow that posts release notes to Discord. It
+is not called by this fork's stable release workflow.
 
 ### Tweet Release (`tweet-release.yml`)
 
-Fires after a successful stable release. Posts an announcement tweet.
+Standalone manual or reusable workflow that posts an announcement tweet. It is
+not called by this fork's stable release workflow.
 
 Docs are built and published as part of the release pipeline rather than on every `master` push. Translation is a local-only workflow for dedicated translation-cache PRs, new locales, and release translation passes. Routine English docs PRs may defer broad generated `.po` churn. See [Docs & Translations](./docs-and-translations.md) for contributor guidance and the [Release Runbook](./release-runbook.md#refresh-and-pin-translations) for the release procedure.
 
