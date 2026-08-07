@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github/workflows/release-stable-manual.yml"
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
+INSTALLER = (ROOT / "install.sh").read_text(encoding="utf-8")
 
 
 def job_block(job_id: str) -> str:
@@ -148,6 +149,13 @@ class ReleaseAttestationContractTest(unittest.TestCase):
     def test_release_uploads_only_the_consolidated_asset_directory(self) -> None:
         self.assertEqual(self.publish.count('gh release create "$TAG" release-assets/*'), 2)
         self.assertNotIn("gh release upload", WORKFLOW)
+
+    def test_attested_installer_fetches_this_forks_release_assets(self) -> None:
+        self.assertIn("cp install.sh release-assets/", self.publish)
+        self.assertIn("github.com/IvanLi-CN/zeroclaw.git", INSTALLER)
+        self.assertIn("api.github.com/repos/IvanLi-CN/zeroclaw/releases/latest", INSTALLER)
+        self.assertIn("github.com/IvanLi-CN/zeroclaw/releases/download", INSTALLER)
+        self.assertNotIn("zeroclaw-labs/zeroclaw", INSTALLER)
 
     def test_cosign_remains_for_ghcr_images_only(self) -> None:
         self.assertRegex(
