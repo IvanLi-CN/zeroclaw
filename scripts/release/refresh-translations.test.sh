@@ -76,6 +76,8 @@ if [[ "$remote_main" == "$base_commit" ]]; then
 fi
 assert_equal "$remote_main" "$remote_tag" "tag should point at refreshed remote main"
 assert_equal "$remote_main" "$pinned_head" "main repo should pin the refreshed tag"
+git -C "$success_repo/docs/book/po" show -s --format=%B "$remote_main" \
+  | grep -q '^Signed-off-by: Test <test@example.com>$'
 
 stale_root="$(setup_fixture stale)"
 stale_repo="$stale_root/zeroclaw"

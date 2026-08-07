@@ -957,8 +957,8 @@ jobs:
           **Online**
           \`\`\`bash
           gh attestation verify <artifact> \\
-            --repo zeroclaw-labs/zeroclaw \\
-            --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \\
+            --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-stable-manual.yml \\
             --source-digest ${SOURCE_DIGEST}
           \`\`\`
           VERIFY_EOF
@@ -971,12 +971,12 @@ jobs:
           \`zeroclaw-${TAG}-verification.tar.gz\`. Verify the archive and checksums online:
           \`\`\`bash
           gh attestation verify zeroclaw-${TAG}-verification.tar.gz \\
-            --repo zeroclaw-labs/zeroclaw \\
-            --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \\
+            --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-stable-manual.yml \\
             --source-digest ${SOURCE_DIGEST}
           gh attestation verify SHA256SUMS \\
-            --repo zeroclaw-labs/zeroclaw \\
-            --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \\
+            --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-stable-manual.yml \\
             --source-digest ${SOURCE_DIGEST}
           awk -v file="zeroclaw-${TAG}-verification.tar.gz" '\$2 == file { print }' SHA256SUMS | sha256sum -c -
           mkdir verification
@@ -985,8 +985,8 @@ jobs:
           Move those files into the offline environment, then run:
           \`\`\`bash
           gh attestation verify <artifact> \\
-            --repo zeroclaw-labs/zeroclaw \\
-            --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \\
+            --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-stable-manual.yml \\
             --source-digest ${SOURCE_DIGEST} \\
             --bundle verification/<artifact>.attestation.jsonl \\
             --custom-trusted-root verification/trusted_root.jsonl
@@ -1041,21 +1041,6 @@ jobs:
               --notes-file release-notes.md \
               --latest
           fi
-
-  redeploy-website:
-    name: Trigger Website Redeploy
-    needs: [publish]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger website redeploy
-        env:
-          PAT: ${{ secrets.WEBSITE_REPO_PAT }}
-        run: |
-          curl -fsSL -X POST \
-            -H "Authorization: token $PAT" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/zeroclaw-labs/zeroclaw-website/dispatches \
-            -d '{"event_type":"new-release","client_payload":{"install_script_url":"https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh"}}'
 
   deploy-docs:
     name: Deploy Versioned Docs
@@ -1163,8 +1148,8 @@ jobs:
         # Signs by digest so the signature is immutable regardless of tag mutations.
         # Consumers verify with:
         #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-        #     --certificate-identity-regexp "^https://github.com/zeroclaw-labs/zeroclaw/" \
-        #     ghcr.io/zeroclaw-labs/zeroclaw@<digest>
+        #     --certificate-identity-regexp "^https://github.com/IvanLi-CN/zeroclaw/" \
+        #     ghcr.io/IvanLi-CN/zeroclaw@<digest>
         env:
           DIGEST: ${{ steps.build-push.outputs.digest }}
         run: |
@@ -1191,46 +1176,3 @@ jobs:
         run: |
           cosign sign --yes \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
-
-  # ── Post-publish: package manager auto-sync ─────────────────────────
-  scoop:
-    name: Update Scoop Manifest
-    needs: [validate, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
-    uses: ./.github/workflows/pub-scoop.yml
-    with:
-      release_tag: ${{ needs.validate.outputs.tag }}
-      dry_run: false
-    secrets: inherit
-
-  aur:
-    name: Update AUR Package
-    needs: [validate, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
-    uses: ./.github/workflows/pub-aur.yml
-    with:
-      release_tag: ${{ needs.validate.outputs.tag }}
-      dry_run: false
-    secrets: inherit
-
-  # ── Post-publish: announce after release + website are live ───────────
-  # Docker push can be slow; don't let it block announcements.
-  tweet:
-    name: Tweet Release
-    needs: [validate, publish, redeploy-website]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
-    uses: ./.github/workflows/tweet-release.yml
-    with:
-      release_tag: ${{ needs.validate.outputs.tag }}
-      release_url: https://github.com/zeroclaw-labs/zeroclaw/releases/tag/${{ needs.validate.outputs.tag }}
-    secrets: inherit
-
-  discord:
-    name: Discord Announcement
-    needs: [validate, publish, redeploy-website]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
-    uses: ./.github/workflows/discord-release.yml
-    with:
-      release_tag: ${{ needs.validate.outputs.tag }}
-      release_url: https://github.com/zeroclaw-labs/zeroclaw/releases/tag/${{ needs.validate.outputs.tag }}
-    secrets: inherit

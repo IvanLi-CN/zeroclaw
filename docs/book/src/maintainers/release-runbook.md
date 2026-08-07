@@ -8,7 +8,7 @@
 > If anything in here feels heavyweight, that is intentional friction, we do
 > not yet have the automation discipline to remove it safely.
 
-Last verified against the `v0.8.2` release cycle.
+Last verified against the `v0.8.5` release cycle.
 
 ---
 
@@ -22,11 +22,9 @@ Last verified against the `v0.8.2` release cycle.
 6. [Verify the release exists and assets are downloadable](#step-6-verify-the-release)
 7. [Versioned documentation deployment](#step-7-versioned-documentation-deployment)
 
-That is the entire process. Everything else (Docker, website redeploy, Scoop,
-AUR, Discord, tweet) runs automatically as downstream jobs. Homebrew Core
-detects the stable GitHub release through its own autobump service. You do not
-need to do anything for those unless a job explicitly fails or Homebrew's
-external bump remains stale.
+That is the entire process for this repository. Docker images and versioned
+documentation run as downstream jobs. Website redeploy, package-manager sync,
+and social announcements are intentionally outside this fork's release chain.
 
 ---
 
@@ -99,7 +97,7 @@ Then run the release wrapper:
 
 `refresh-translations.sh` reads the version from `Cargo.toml` (nothing typed by
 hand), runs the translation pass, commits and pushes the catalogues to the
-[`zeroclaw-labs/zeroclaw-docs-translations`](https://github.com/zeroclaw-labs/zeroclaw-docs-translations)
+[`IvanLi-CN/zeroclaw-docs-translations`](https://github.com/IvanLi-CN/zeroclaw-docs-translations)
 submodule, cuts the `v{version}` tag there, and stages the main-repo gitlink
 pinned to that tag. It initialises the submodule if it is not already checked
 out. Run it after `bump-version.sh` so the `Cargo.toml` version it reads is the
@@ -367,7 +365,7 @@ standard PR off master.
 Go to:
 
 ```
-https://github.com/zeroclaw-labs/zeroclaw/actions/workflows/release-stable-manual.yml
+https://github.com/IvanLi-CN/zeroclaw/actions/workflows/release-stable-manual.yml
 ```
 
 Click **Run workflow**. Fill in:
