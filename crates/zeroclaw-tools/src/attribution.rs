@@ -67,6 +67,7 @@ use crate::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
 };
+use crate::telegram_sticker::TelegramStickerTool;
 use crate::text_browser::TextBrowserTool;
 use crate::tool_search::ToolSearchTool;
 use crate::weather_tool::WeatherTool;
@@ -130,6 +131,7 @@ tool_attribution!(ReactionTool, ToolKind::Plugin);
 tool_attribution!(ReportTemplateTool, ToolKind::Plugin);
 tool_attribution!(ScreenshotTool, ToolKind::Plugin);
 tool_attribution!(SendViaTool, ToolKind::Plugin);
+tool_attribution!(TelegramStickerTool, ToolKind::Plugin);
 tool_attribution!(SessionDeleteTool, ToolKind::Plugin);
 tool_attribution!(SessionResetTool, ToolKind::Plugin);
 tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);

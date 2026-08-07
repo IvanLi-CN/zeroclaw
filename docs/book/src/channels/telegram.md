@@ -67,6 +67,10 @@ zeroclaw config set agents.primary.channels
 Afterward, the relevant non-secret structure is equivalent to:
 
 ```toml
+[channels]
+# Shared by every Telegram alias. Names are Telegram sticker-set names.
+telegram_sticker_sets = ["mood_pack", "celebrations"]
+
 [channels.telegram.home]
 enabled = true
 # bot_token is stored encrypted after the masked `config set` prompt
@@ -146,6 +150,33 @@ groups before pairing replies, acknowledgement reactions, media or voice
 downloads, and model work. Group membership never authorizes the same sender
 in a direct message. When `mention_only = true`, the group allowlist is checked
 first and the mention requirement is checked only for an allowed group.
+
+### Send configured stickers
+
+Configure `channels.telegram_sticker_sets` once at the root `[channels]`
+table. Every Telegram alias reads the same list; an alias cannot define a
+separate sticker-pack list. Its own `bot_token` and `api_base_url` continue to
+identify the Bot API client used for delivery.
+
+During an active Telegram turn, the agent can call the typed `sticker` tool
+with an exact `emoji` selector. The tool never accepts a raw Telegram
+`file_id`. It fetches each configured set with `getStickerSet` on demand,
+keeps only a bounded in-memory metadata cache, selects only an exact metadata
+match, and sends it through `sendSticker`.
+
+Sticker delivery is an action operation and therefore follows the agent's
+risk profile and approval policy. At most three sends may succeed in one turn.
+An unconfigured or unavailable pack, an unmatched emoji, a Telegram API
+failure, and a fourth attempt all return a tool failure without claiming
+delivery.
+
+For text that must appear before a sticker in the same Telegram conversation,
+call `send_via` with a `body` and no `target`; its active-turn route sends that
+text to the current chat before the following sticker tool call. The ordinary
+assistant response supplies text that follows a sticker. When a sticker is the
+only visible reply, the agent returns `NO_REPLY[INFO]` after the successful
+tool call; the channel runtime then avoids sending an empty fallback text
+message.
 
 ## 4. Start the channel and inspect it
 
@@ -246,6 +277,7 @@ running channel would read. For a valid alias it creates or updates
 | `zeroclaw channel bind-telegram ...` with a detected running systemd, OpenRC, or launchd service | The CLI saves the config and restarts the managed service automatically. |
 | `bind-telegram` while `zeroclaw daemon` or `zeroclaw channel start` is running in another terminal | After you stop and restart that foreground process. The CLI process changed the file, not the other process's in-memory config. |
 | Direct `config.toml` edit or standalone `zeroclaw config set` change | After a daemon reload or process restart. Saving alone does not rebuild long-running listeners. |
+| `channels.telegram_sticker_sets` after a daemon reload | The next `sticker` call resolves the new shared list from live configuration. Cached metadata remains bounded and is not persistent. |
 | Restart with no matching peers | A new one-time pairing code is generated. |
 | Restart after a peer was saved | The peer remains authorized and startup pairing is not activated. |
 

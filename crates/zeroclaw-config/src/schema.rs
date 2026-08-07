@@ -13075,6 +13075,11 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub telegram: HashMap<String, TelegramConfig>,
+    /// Sticker-set names shared by every Telegram bot alias
+    /// (`[channels].telegram_sticker_sets`).
+    #[tab(Behavior)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telegram_sticker_sets: Vec<String>,
     /// Discord bot channel instances (`[channels.discord.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -13625,6 +13630,7 @@ impl Default for ChannelsConfig {
         Self {
             cli: true,
             telegram: HashMap::new(),
+            telegram_sticker_sets: Vec::new(),
             discord: HashMap::new(),
             slack: HashMap::new(),
             mattermost: HashMap::new(),
@@ -25751,6 +25757,7 @@ auto_save = true
                         reply_queue_depth_max: 0,
                     },
                 )]),
+                telegram_sticker_sets: Vec::new(),
                 discord: HashMap::new(),
                 slack: HashMap::new(),
                 mattermost: HashMap::new(),
@@ -27468,6 +27475,7 @@ allowed_users = ["@u:matrix.org"]
         let c = ChannelsConfig {
             cli: true,
             telegram: HashMap::new(),
+            telegram_sticker_sets: Vec::new(),
             discord: HashMap::new(),
             slack: HashMap::new(),
             mattermost: HashMap::new(),
@@ -28037,6 +28045,7 @@ allowed_numbers = ["+1", "+2"]
         let c = ChannelsConfig {
             cli: true,
             telegram: HashMap::new(),
+            telegram_sticker_sets: Vec::new(),
             discord: HashMap::new(),
             slack: HashMap::new(),
             mattermost: HashMap::new(),
@@ -35560,6 +35569,10 @@ allowed_users = []
             "root [channels] settings should include other global channel controls"
         );
         assert!(
+            direct_channel_paths.contains(&"channels.telegram_sticker_sets"),
+            "global Telegram sticker-set configuration must reach the dashboard surface"
+        );
+        assert!(
             paths
                 .iter()
                 .any(|path| path == "channels.matrix.default.enabled"),
@@ -35568,6 +35581,32 @@ allowed_users = []
         assert!(
             !direct_channel_paths.contains(&"channels.matrix.default.enabled"),
             "global channel settings must not include per-alias fields"
+        );
+    }
+
+    #[cfg(feature = "schema-export")]
+    #[test]
+    async fn telegram_sticker_sets_appear_in_generated_channel_schema() {
+        let schema = schemars::schema_for!(ChannelsConfig);
+        let schema_json = serde_json::to_value(&schema).expect("schema should serialize to json");
+        let properties = schema_json
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("channel schema should expose properties");
+        let sticker_sets = properties
+            .get("telegram_sticker_sets")
+            .expect("Telegram sticker sets should be exposed to schema consumers");
+
+        assert_eq!(
+            sticker_sets.get("type").and_then(serde_json::Value::as_str),
+            Some("array")
+        );
+        assert!(
+            sticker_sets
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|description| description.contains("Sticker-set names")),
+            "schema should retain the configuration description"
         );
     }
 

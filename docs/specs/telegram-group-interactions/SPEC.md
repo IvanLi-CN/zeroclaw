@@ -118,6 +118,11 @@ or file-ID registry.
 
 PR: none
 
+Mock Channels settings render the shared Telegram sticker-set field as a
+root-level editable string array.
+
+![Telegram sticker-set configuration](./assets/telegram-sticker-config.png)
+
 ## Related PRs
 
 - None
@@ -138,4 +143,3 @@ PR: none
 - `docs/book/src/architecture/tool-execution-lifecycle.md`
 - `docs/book/src/architecture/config-lifecycle.md`
 - `docs/book/src/channels/telegram.md`
-

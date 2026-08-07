@@ -5,32 +5,29 @@
 
 ## Current Status
 
-- Implementation: planned
+- Implementation: delivered
 - Lifecycle: active
-- Baseline: `origin/master@d04b345bda3515e0b3bed0c2453bf0c880c04816`
-- Integration branch: `prd/telegram-group-interactions`
 - Final target: `IvanLi-CN/zeroclaw:master`
 
 ## Delivery Slices
 
 | Slice | Risk | Status | Coverage |
 | --- | --- | --- | --- |
-| Telegram group authorization | wave-gated | Planned | Alias allowlist and early inbound gate |
-| Telegram reaction parity | low | Planned | Add/remove API implementation and ID parsing |
-| Telegram sticker tool | wave-gated | Planned | Shared config, typed tool, lookup/cache/quota |
+| Telegram group authorization | wave-gated | Delivered | Alias allowlist and early inbound gate |
+| Telegram reaction parity | low | Delivered | Add/remove API implementation and ID parsing |
+| Telegram sticker tool | wave-gated | Delivered | Shared config with explicit configuration-fixture coverage, typed Act tool, proxy-aware lookup/cache/quota, active-turn text-before-sticker, and sticker-only turn completion |
 
 ## Remaining Gaps
 
-- All three delivery slices remain to be implemented and validated.
-- Telegram and tool documentation remains to be updated with shipped behavior.
-- Aggregate validation and same-SHA review remain outstanding.
+- No implementation gaps are currently identified for the three delivery slices.
 
 ## Related Changes
 
-- None
+- Telegram channel adapter, runtime tool registry, configuration schema, and
+  Telegram/tool documentation. Sticker-only completion persists the tool turn,
+  reconciles acknowledgement reactions, and suppresses empty text output.
 
 ## References
 
 - `./SPEC.md`
 - `./HISTORY.md`
-

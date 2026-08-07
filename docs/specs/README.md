@@ -9,5 +9,4 @@ current contract, `IMPLEMENTATION.md` for implementation coverage, and
 
 | Topic | Lifecycle | Implementation | Spec | Successor | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Telegram group interactions | active | Planned (0/3 slices) | `telegram-group-interactions/SPEC.md` | - | Group authorization, reactions, and typed sticker delivery |
-
+| Telegram group interactions | active | Delivered (3/3 slices) | `telegram-group-interactions/SPEC.md` | - | Group authorization, reactions, and typed sticker delivery |
