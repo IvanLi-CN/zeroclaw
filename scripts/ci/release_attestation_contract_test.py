@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github/workflows/release-stable-manual.yml"
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
 INSTALLER = (ROOT / "install.sh").read_text(encoding="utf-8")
+WINDOWS_INSTALLER = (ROOT / "setup.bat").read_text(encoding="utf-8")
 
 
 def job_block(job_id: str) -> str:
@@ -156,6 +157,14 @@ class ReleaseAttestationContractTest(unittest.TestCase):
         self.assertIn("api.github.com/repos/IvanLi-CN/zeroclaw/releases/latest", INSTALLER)
         self.assertIn("github.com/IvanLi-CN/zeroclaw/releases/download", INSTALLER)
         self.assertNotIn("zeroclaw-labs/zeroclaw", INSTALLER)
+
+    def test_windows_installer_fetches_this_forks_release_assets(self) -> None:
+        self.assertIn("set \"REPO=https://github.com/IvanLi-CN/zeroclaw\"", WINDOWS_INSTALLER)
+        self.assertIn(
+            "github.com/IvanLi-CN/zeroclaw/releases/latest/download",
+            WINDOWS_INSTALLER,
+        )
+        self.assertNotIn("github.com/zeroclaw-labs/zeroclaw", WINDOWS_INSTALLER)
 
     def test_cosign_remains_for_ghcr_images_only(self) -> None:
         self.assertRegex(
