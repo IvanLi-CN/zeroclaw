@@ -6,13 +6,13 @@ bot creation through the first authorized conversation.
 
 ## How the current implementation is wired
 
-Telegram setup has three separate sources of truth. The channel block owns the
-Telegram connection, the agent block owns routing, and peer groups own inbound
-authorization:
+Telegram setup has four separate sources of truth. The channel block owns the
+Telegram connection and optional alias-scoped group gate, the agent block owns
+routing, and peer groups own direct-message authorization:
 
 ```mermaid
 flowchart LR
-    T["channels.telegram.home<br/>token and channel behavior"] --> C["TelegramChannel<br/>alias = home"]
+    T["channels.telegram.home<br/>token, group gate, behavior"] --> C["TelegramChannel<br/>alias = home"]
     P["matching peer groups<br/>authorized Telegram identities"] --> C
     G["Telegram Bot API<br/>getUpdates long poll"] --> C
     C -->|"authorized ChannelMessage"| R["AgentRouter"]
@@ -26,9 +26,10 @@ from the shared `Config` when each message arrives. It accepts either the
 sender's numeric Telegram user ID or username, then hands an authorized
 `ChannelMessage` to the shared channel dispatch and agent-turn lifecycle.
 
-There is no `allowed_users` field under `[channels.telegram.<alias>]`.
-Authorization lives in [Peer Groups](./peer-groups.md); that page is the
-canonical reference for peer-group fields, matching, and multi-agent behavior.
+Direct-message authorization lives in [Peer Groups](./peer-groups.md); that
+page is the canonical reference for peer-group fields, matching, and
+multi-agent behavior. Group authorization is separate and alias-scoped through
+`channels.telegram.<alias>.allowed_groups`.
 
 ## 1. Create a Telegram bot
 
@@ -66,9 +67,16 @@ zeroclaw config set agents.primary.channels
 Afterward, the relevant non-secret structure is equivalent to:
 
 ```toml
+[channels]
+# Shared by every Telegram alias. Names are Telegram sticker-set names.
+telegram_sticker_sets = ["mood_pack", "celebrations"]
+
 [channels.telegram.home]
 enabled = true
 # bot_token is stored encrypted after the masked `config set` prompt
+# Optional exact Telegram group/supergroup chat IDs. An empty list preserves
+# the legacy peer-group behavior for groups.
+allowed_groups = [-100200300]
 
 [agents.primary]
 channels = ["telegram.home"]
@@ -124,6 +132,51 @@ channel instance. This includes a wildcard peer group.
 > any tools its risk profile permits. Use a wildcard only for a deliberately
 > public bot with a suitably restricted agent; it is not a shortcut for private
 > setup.
+
+### Permit group chats
+
+Set `allowed_groups` to exact numeric Telegram `chat.id` values when this alias
+should accept group or supergroup messages from every member:
+
+```toml
+[channels.telegram.home]
+allowed_groups = [-100200300, -100200301]
+```
+
+An empty list keeps the existing behavior: group messages still use the
+configured peer groups, while direct messages always continue through the
+normal peer authorization and `/bind` flow. A non-empty list rejects unlisted
+groups before pairing replies, acknowledgement reactions, media or voice
+downloads, and model work. Group membership never authorizes the same sender
+in a direct message. When `mention_only = true`, the group allowlist is checked
+first and the mention requirement is checked only for an allowed group.
+
+### Send configured stickers
+
+Configure `channels.telegram_sticker_sets` once at the root `[channels]`
+table. Every Telegram alias reads the same list; an alias cannot define a
+separate sticker-pack list. Its own `bot_token` and `api_base_url` continue to
+identify the Bot API client used for delivery.
+
+During an active Telegram turn, the agent can call the typed `sticker` tool
+with an exact `emoji` selector. The tool never accepts a raw Telegram
+`file_id`. It fetches each configured set with `getStickerSet` on demand,
+keeps only a bounded in-memory metadata cache, selects only an exact metadata
+match, and sends it through `sendSticker`.
+
+Sticker delivery is an action operation and therefore follows the agent's
+risk profile and approval policy. At most three sends may succeed in one turn.
+An unconfigured or unavailable pack, an unmatched emoji, a Telegram API
+failure, and a fourth attempt all return a tool failure without claiming
+delivery.
+
+For text that must appear before a sticker in the same Telegram conversation,
+call `send_via` with a `body` and no `target`; its active-turn route sends that
+text to the current chat before the following sticker tool call. The ordinary
+assistant response supplies text that follows a sticker. When a sticker is the
+only visible reply, the agent returns `NO_REPLY[INFO]` after the successful
+tool call; the channel runtime then avoids sending an empty fallback text
+message.
 
 ## 4. Start the channel and inspect it
 
@@ -224,6 +277,7 @@ running channel would read. For a valid alias it creates or updates
 | `zeroclaw channel bind-telegram ...` with a detected running systemd, OpenRC, or launchd service | The CLI saves the config and restarts the managed service automatically. |
 | `bind-telegram` while `zeroclaw daemon` or `zeroclaw channel start` is running in another terminal | After you stop and restart that foreground process. The CLI process changed the file, not the other process's in-memory config. |
 | Direct `config.toml` edit or standalone `zeroclaw config set` change | After a daemon reload or process restart. Saving alone does not rebuild long-running listeners. |
+| `channels.telegram_sticker_sets` after a daemon reload | The next `sticker` call resolves the new shared list from live configuration. Cached metadata remains bounded and is not persistent. |
 | Restart with no matching peers | A new one-time pairing code is generated. |
 | Restart after a peer was saved | The peer remains authorized and startup pairing is not activated. |
 
@@ -255,7 +309,7 @@ logging is enabled, events are also written under the install directory at
 | The bot still asks for operator approval after `bind-telegram` | The running foreground process has not reloaded, or the identity was bound to the wrong alias. Restart it and verify the `--alias` value. |
 | The bot is silent | Confirm `enabled = true`, confirm an enabled agent owns `telegram.<alias>`, run `zeroclaw channel doctor`, then inspect logs. |
 | `Telegram polling conflict (409)` | More than one process is using the same bot token. Stop the duplicate daemon or channel process. |
-| Group messages are ignored | With `mention_only = true`, mention the bot or reply directly to one of its messages. Direct messages are still processed. |
+| Group messages are ignored | Check that the group `chat.id` is in `allowed_groups` when that list is non-empty; with `mention_only = true`, mention the bot or reply directly to one of its messages. Direct messages retain peer authorization. |
 | Draft edits report `Too Many Requests` | Increase `channels.telegram.<alias>.draft_update_interval_ms` or disable streaming. |
 
 The full Telegram field list is generated from the live configuration schema:

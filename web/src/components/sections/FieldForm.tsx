@@ -6,7 +6,7 @@
 // Per-field behavior:
 //  * bool       → <select> true/false
 //  * enum       → <select> with enum_variants
-//  * string-array → <textarea>, one value per line
+//  * string-array/integer-array → <textarea>, one value per line
 //  * integer/float → <input type="number">
 //  * secret     → "set" indicator + Change when populated; masked input with
 //    a reveal/hide toggle when unset or changing
@@ -182,6 +182,7 @@ function rendererFor(
     case "bool":
       return "bool";
     case "string-array":
+    case "integer-array":
       return "array";
     case "object-array":
       return "object-array";
@@ -370,7 +371,11 @@ function modelFallbackExample(path: string): string {
 
 function defaultInputValue(entry: ListResponseEntry): string {
   const v = entry.value;
-  if (entry.kind === "string-array" || entry.kind === "object-array") {
+  if (
+    entry.kind === "string-array" ||
+    entry.kind === "integer-array" ||
+    entry.kind === "object-array"
+  ) {
     // API returns the TOML/JSON array form as a string. Keep it as the
     // canonical draft shape; the row editor parses on render.
     if (typeof v === "string") return v === "<unset>" ? "[]" : v;
@@ -388,7 +393,9 @@ function parseInput(entry: ListResponseEntry, raw: string): unknown {
     case "bool":
       return raw === "true";
     case "array":
-      return parseArrayDraft(raw);
+      return entry.kind === "integer-array"
+        ? parseIntegerArrayDraft(raw)
+        : parseArrayDraft(raw);
     case "object-array": {
       const trimmed = raw.trim();
       if (!trimmed) return [];
@@ -432,6 +439,13 @@ function parseArrayDraft(raw: string): string[] {
     .split(/[\n,]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+function parseIntegerArrayDraft(raw: string): Array<number | string> {
+  return parseArrayDraft(raw).map((value) => {
+    const integer = Number(value);
+    return Number.isSafeInteger(integer) ? integer : value;
+  });
 }
 
 function parseArrayRows(value: string): string[] {

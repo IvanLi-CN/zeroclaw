@@ -501,15 +501,27 @@ fn config_multiple_channels_coexist() {
     let toml_str = r#"
 default_temperature = 0.7
 
+[channels]
+telegram_sticker_sets = ["mood_pack", "celebrations"]
+
 [channels.telegram.default]
 bot_token = "test_token"
-allowed_users = ["zeroclaw_user"]
+allowed_groups = [-100200300]
 
 [channels.discord.default]
 bot_token = "test_token"
 "#;
     let parsed: Config = toml::from_str(toml_str).expect("multi-channel config should parse");
     assert!(!parsed.channels.telegram.is_empty());
+    assert_eq!(
+        parsed.channels.telegram["default"].allowed_groups,
+        vec![-100200300]
+    );
+    assert_eq!(
+        parsed.channels.telegram_sticker_sets,
+        vec!["mood_pack", "celebrations"],
+        "Telegram aliases share one root-level sticker-set configuration"
+    );
     assert!(!parsed.channels.discord.is_empty());
     assert!(parsed.channels.slack.is_empty());
 }

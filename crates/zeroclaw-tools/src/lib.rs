@@ -80,6 +80,7 @@ pub mod report_templates;
 pub mod screenshot;
 pub mod send_via;
 pub mod sessions;
+pub mod telegram_sticker;
 pub mod text_browser;
 pub mod tool_search;
 pub mod weather_tool;

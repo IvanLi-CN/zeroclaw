@@ -53,6 +53,35 @@ pub fn coerce_for_set_prop(
             ),
         )),
 
+        // Integer-array fields must preserve the numeric identity of values
+        // such as Telegram chat IDs rather than accepting string coercions.
+        (Some(PropKind::IntegerArray), serde_json::Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                if item.as_i64().is_none() {
+                    return Err(ConfigApiError::new(
+                        ConfigApiCode::ValueTypeMismatch,
+                        format!(
+                            "array element [{i}] is {} - `Vec<i64>` requires integer elements",
+                            json_type_name(item),
+                        ),
+                    ));
+                }
+            }
+            serde_json::to_string(value).map_err(|e| {
+                ConfigApiError::new(
+                    ConfigApiCode::ValueTypeMismatch,
+                    format!("could not serialize JSON value: {e}"),
+                )
+            })
+        }
+        (Some(PropKind::IntegerArray), other) => Err(ConfigApiError::new(
+            ConfigApiCode::ValueTypeMismatch,
+            format!(
+                "`Vec<i64>` field requires a JSON array; got {}",
+                json_type_name(other),
+            ),
+        )),
+
         // `Vec<T>` of objects: any JSON array is acceptable; element shape
         // is validated by serde when `set_prop` deserializes back into the
         // target type. We just pass the JSON through verbatim.
@@ -203,6 +232,7 @@ mod tests {
             Some(PropKind::Float),
             Some(PropKind::Enum),
             Some(PropKind::StringArray),
+            Some(PropKind::IntegerArray),
         ] {
             assert_eq!(
                 coerce_for_set_prop(&serde_json::Value::Null, k).unwrap(),
@@ -239,6 +269,23 @@ mod tests {
     fn empty_array_valid_for_string_array() {
         let s = coerce_for_set_prop(&serde_json::json!([]), Some(PropKind::StringArray)).unwrap();
         assert_eq!(s, "[]");
+    }
+
+    #[test]
+    fn integer_array_requires_signed_integer_elements() {
+        let value = serde_json::json!([-100200300, 42]);
+        assert_eq!(
+            coerce_for_set_prop(&value, Some(PropKind::IntegerArray)).unwrap(),
+            "[-100200300,42]"
+        );
+
+        let err = coerce_for_set_prop(
+            &serde_json::json!([-100200300, "42"]),
+            Some(PropKind::IntegerArray),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ConfigApiCode::ValueTypeMismatch);
+        assert!(err.message.contains("[1]"));
     }
 
     #[test]

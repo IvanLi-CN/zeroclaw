@@ -313,13 +313,28 @@ fn build_telegram_ack_reaction_request(
     message_id: i64,
     emoji: &str,
 ) -> serde_json::Value {
+    build_telegram_reaction_request(chat_id, message_id, Some(emoji))
+}
+
+fn build_telegram_reaction_request(
+    chat_id: &str,
+    message_id: i64,
+    emoji: Option<&str>,
+) -> serde_json::Value {
+    let reaction = emoji.map_or_else(
+        || serde_json::json!([]),
+        |emoji| {
+            serde_json::json!([{
+                "type": "emoji",
+                "emoji": emoji
+            }])
+        },
+    );
+
     serde_json::json!({
         "chat_id": chat_id,
         "message_id": message_id,
-        "reaction": [{
-            "type": "emoji",
-            "emoji": emoji
-        }]
+        "reaction": reaction,
     })
 }
 
@@ -543,6 +558,9 @@ pub struct TelegramChannel {
     /// Resolves inbound external peers from canonical state at message-time.
     /// No cache (see AGENTS.md "ABSOLUTE RULE — SINGLE SOURCE OF TRUTH").
     peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Resolves this alias's permitted group IDs from canonical config at
+    /// message-time. No cache: reloads must apply the current policy.
+    allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync>,
     persist: Option<Arc<RwLock<Config>>>,
     pairing: Option<PairingGuard>,
     client: reqwest::Client,
@@ -641,6 +659,7 @@ impl TelegramChannel {
             bot_token,
             alias,
             peer_resolver,
+            allowed_groups_resolver: Arc::new(Vec::new) as Arc<dyn Fn() -> Vec<i64> + Send + Sync>,
             persist: None,
             pairing,
             client: reqwest::Client::new(),
@@ -674,6 +693,16 @@ impl TelegramChannel {
         voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     ) -> Self {
         self.voice_peer_resolver = voice_peer_resolver;
+        self
+    }
+
+    /// Set the resolver used to read this alias's group authorization policy
+    /// live from configuration instead of retaining a policy snapshot.
+    pub fn with_allowed_groups_resolver(
+        mut self,
+        allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync>,
+    ) -> Self {
+        self.allowed_groups_resolver = allowed_groups_resolver;
         self
     }
 
@@ -844,6 +873,72 @@ impl TelegramChannel {
         } else {
             (reply_target.to_string(), None)
         }
+    }
+
+    fn parse_telegram_reaction_target(
+        channel_id: &str,
+        message_id: &str,
+    ) -> anyhow::Result<(String, i64)> {
+        if let Some(composite) = message_id.strip_prefix("telegram_") {
+            let (chat_id, message_id) = composite.rsplit_once('_').ok_or_else(|| {
+                anyhow::Error::msg(
+                    "Telegram reaction target parse failed: invalid composite message ID",
+                )
+            })?;
+            let chat_id = chat_id.parse::<i64>().with_context(
+                || "Telegram reaction target parse failed: composite chat ID is not numeric",
+            )?;
+            let message_id = message_id.parse::<i64>().with_context(
+                || "Telegram reaction target parse failed: composite message ID is not numeric",
+            )?;
+            return Ok((chat_id.to_string(), message_id));
+        }
+
+        let (chat_id, _) = Self::parse_reply_target(channel_id);
+        if chat_id.trim().is_empty() {
+            anyhow::bail!("Telegram reaction target parse failed: chat ID is empty");
+        }
+        let message_id = message_id
+            .parse::<i64>()
+            .with_context(|| "Telegram reaction target parse failed: message ID is not numeric")?;
+        Ok((chat_id, message_id))
+    }
+
+    async fn set_message_reaction(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        emoji: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let body = build_telegram_reaction_request(chat_id, message_id, emoji);
+        let response = self
+            .http_client()
+            .post(self.api_url("setMessageReaction"))
+            .json(&body)
+            .send()
+            .await
+            .context("Telegram setMessageReaction transport failed")?;
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .context("Telegram setMessageReaction response read failed")?;
+
+        if !status.is_success() {
+            anyhow::bail!("Telegram setMessageReaction HTTP failure ({status}): {response_body}");
+        }
+
+        let response_json: serde_json::Value = serde_json::from_str(&response_body)
+            .context("Telegram setMessageReaction response decode failed")?;
+        if response_json.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            let description = response_json
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown Telegram API error");
+            anyhow::bail!("Telegram setMessageReaction API failure: {description}");
+        }
+
+        Ok(())
     }
 
     fn extract_update_message_target(update: &serde_json::Value) -> Option<(String, i64)> {
@@ -1443,6 +1538,28 @@ impl TelegramChannel {
             .unwrap_or(false)
     }
 
+    /// Returns a group allowlist decision only when this alias has enabled the
+    /// group policy. `None` preserves legacy peer authorization for direct
+    /// messages and groups while the list is empty.
+    fn group_allowlist_authorization(&self, message: &serde_json::Value) -> Option<bool> {
+        if !Self::is_group_message(message) {
+            return None;
+        }
+
+        let allowed_groups = (self.allowed_groups_resolver)();
+        if allowed_groups.is_empty() {
+            return None;
+        }
+
+        Some(
+            message
+                .get("chat")
+                .and_then(|chat| chat.get("id"))
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|chat_id| allowed_groups.contains(&chat_id)),
+        )
+    }
+
     /// Check whether `message` is a reply to a message sent by the bot
     /// itself. When true, the `mention_only` gate should be bypassed.
     fn is_reply_to_bot(message: &serde_json::Value, bot_id: i64) -> bool {
@@ -1497,6 +1614,19 @@ impl TelegramChannel {
         I: IntoIterator<Item = &'a str>,
     {
         identities.into_iter().any(|id| self.is_user_allowed(id))
+    }
+
+    fn is_message_authorized(&self, message: &serde_json::Value) -> bool {
+        if let Some(group_allowed) = self.group_allowlist_authorization(message) {
+            return group_allowed;
+        }
+
+        let (username, sender_id, _) = Self::extract_sender_info(message);
+        let mut identities = vec![username.as_str()];
+        if let Some(id) = sender_id.as_deref() {
+            identities.push(id);
+        }
+        self.is_any_user_allowed(identities.iter().copied())
     }
 
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
@@ -1782,6 +1912,9 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         update: &serde_json::Value,
     ) -> Option<ChannelMessage> {
         let message = update.get("message")?;
+        if self.group_allowlist_authorization(message) == Some(false) {
+            return None;
+        }
         let attachment = Self::parse_attachment_metadata(message)?;
 
         // Check file size limit
@@ -1799,16 +1932,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
-        let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
-
-        let mut identities = vec![username.as_str()];
-        if let Some(id) = sender_id.as_deref() {
-            identities.push(id);
-        }
-
-        if !self.is_any_user_allowed(identities.iter().copied()) {
+        if !self.is_message_authorized(message) {
             return None;
         }
+
+        let (_, _, sender_identity) = Self::extract_sender_info(message);
 
         // Apply mention_only gate before downloading. Photo / document
         // updates carry no `text` field, so the text-only gate in
@@ -1961,9 +2089,12 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// Returns `None` if the message is not a voice message, transcription is disabled,
     /// or the message exceeds duration limits.
     async fn try_parse_voice_message(&self, update: &serde_json::Value) -> Option<ChannelMessage> {
+        let message = update.get("message")?;
+        if self.group_allowlist_authorization(message) == Some(false) {
+            return None;
+        }
         let config = self.transcription.as_ref()?;
         let manager = self.transcription_manager.as_deref()?;
-        let message = update.get("message")?;
 
         let (file_id, duration) = Self::parse_voice_metadata(message)?;
 
@@ -1979,16 +2110,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
-        let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
-
-        let mut identities = vec![username.as_str()];
-        if let Some(id) = sender_id.as_deref() {
-            identities.push(id);
-        }
-
-        if !self.is_any_user_allowed(identities.iter().copied()) {
+        if !self.is_message_authorized(message) {
             return None;
         }
+
+        let (_, _, sender_identity) = Self::extract_sender_info(message);
 
         let voice_caption = message.get("caption").and_then(serde_json::Value::as_str);
         self.check_media_mention_gate(message, voice_caption)?;
@@ -2292,16 +2418,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
         let text = message.get("text").and_then(serde_json::Value::as_str)?;
 
-        let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
-
-        let mut identities = vec![username.as_str()];
-        if let Some(id) = sender_id.as_deref() {
-            identities.push(id);
-        }
-
-        if !self.is_any_user_allowed(identities.iter().copied()) {
+        if !self.is_message_authorized(message) {
             return None;
         }
+
+        let (_, _, sender_identity) = Self::extract_sender_info(message);
 
         let is_group = Self::is_group_message(message);
         if self.mention_only && is_group {
@@ -3980,6 +4101,12 @@ Ensure only one `zeroclaw` process is using this bot token."
                         continue; // callback_query is not a regular message
                     }
 
+                    if let Some(message) = update.get("message")
+                        && self.group_allowlist_authorization(message) == Some(false)
+                    {
+                        continue;
+                    }
+
                     let msg = if let Some(m) = self.parse_update_message(update) {
                         m
                     } else if let Some(m) = self.try_parse_voice_message(update).await {
@@ -4082,6 +4209,30 @@ Ensure only one `zeroclaw` process is using this bot token."
             handle.abort();
         }
         Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        if emoji.trim().is_empty() {
+            anyhow::bail!("Telegram reaction target parse failed: emoji is empty");
+        }
+        let (chat_id, message_id) = Self::parse_telegram_reaction_target(channel_id, message_id)?;
+        self.set_message_reaction(&chat_id, message_id, Some(emoji))
+            .await
+    }
+
+    async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        let (chat_id, message_id) = Self::parse_telegram_reaction_target(channel_id, message_id)?;
+        self.set_message_reaction(&chat_id, message_id, None).await
     }
 
     /// Delegates to [`Self::request_approval_attributed`] and drops the
@@ -4502,6 +4653,178 @@ mod tests {
         assert_eq!(body["message_id"], 42);
         assert_eq!(body["reaction"][0]["type"], "emoji");
         assert_eq!(body["reaction"][0]["emoji"], "⚡️");
+    }
+
+    #[tokio::test]
+    async fn telegram_add_reaction_posts_set_message_reaction_payload() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/setMessageReaction$"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "-100123456",
+                "message_id": 42,
+                "reaction": [{"type": "emoji", "emoji": "🔥"}],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let ch = TelegramChannel::new(
+            "fake-token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        )
+        .with_api_base(mock_server.uri());
+
+        Channel::add_reaction(&ch, "-100123456", "42", "🔥")
+            .await
+            .expect("Telegram add reaction should succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_remove_reaction_accepts_composite_id_and_sends_empty_list() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/setMessageReaction$"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "-100123456",
+                "message_id": 42,
+                "reaction": [],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let ch = TelegramChannel::new(
+            "fake-token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        )
+        .with_api_base(mock_server.uri());
+
+        Channel::remove_reaction(&ch, "ignored-channel", "telegram_-100123456_42", "🔥")
+            .await
+            .expect("Telegram remove reaction should succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_reaction_rejects_invalid_message_id_before_request() {
+        let ch = TelegramChannel::new(
+            "fake-token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        );
+
+        let err = Channel::add_reaction(&ch, "-100123456", "not-a-message", "🔥")
+            .await
+            .expect_err("invalid Telegram message ID should fail");
+        assert!(
+            err.to_string().contains("reaction target parse failed"),
+            "expected structured parse error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_reaction_propagates_transport_failure() {
+        let ch = TelegramChannel::new(
+            "fake-token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        )
+        .with_api_base("://invalid-url".into());
+
+        let err = Channel::add_reaction(&ch, "-100123456", "42", "🔥")
+            .await
+            .expect_err("invalid Telegram API URL should fail");
+        assert!(
+            err.to_string().contains("transport failed"),
+            "expected structured transport error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_reaction_propagates_http_failure() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/setMessageReaction$"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                serde_json::json!({"ok": false, "description": "reaction is not allowed"}),
+            ))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let ch = TelegramChannel::new(
+            "fake-token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        )
+        .with_api_base(mock_server.uri());
+
+        let err = Channel::add_reaction(&ch, "-100123456", "42", "🔥")
+            .await
+            .expect_err("Telegram HTTP failure should be returned");
+        let message = err.to_string();
+        assert!(message.contains("HTTP failure"), "got: {message}");
+        assert!(
+            message.contains("reaction is not allowed"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_reaction_propagates_api_failure_in_successful_http_response() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/setMessageReaction$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 400,
+                "description": "REACTION_INVALID",
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let ch = TelegramChannel::new(
+            "fake-token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        )
+        .with_api_base(mock_server.uri());
+
+        let err = Channel::add_reaction(&ch, "-100123456", "42", "unsupported")
+            .await
+            .expect_err("Telegram API failure should be returned");
+        let message = err.to_string();
+        assert!(message.contains("API failure"), "got: {message}");
+        assert!(message.contains("REACTION_INVALID"), "got: {message}");
     }
 
     #[test]
@@ -6131,6 +6454,238 @@ mod tests {
             msg["caption"] = serde_json::Value::String(c.to_string());
         }
         msg
+    }
+
+    fn group_text_update(chat_id: i64, sender: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": text,
+                "from": { "id": 7, "username": sender },
+                "chat": { "id": chat_id, "type": "supergroup" }
+            }
+        })
+    }
+
+    #[test]
+    fn allowed_group_members_bypass_peer_auth_without_authorizing_direct_messages() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "home",
+            Arc::new(|| vec!["approved-dm".into()]),
+            false,
+        )
+        .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]));
+
+        let allowed_group = group_text_update(-100_200_300, "group-member", "hello");
+        assert!(
+            ch.parse_update_message(&allowed_group).is_some(),
+            "every member of an allowed group reaches normal dispatch"
+        );
+
+        let unlisted_group = group_text_update(-100_200_301, "group-member", "hello");
+        assert!(ch.parse_update_message(&unlisted_group).is_none());
+
+        let unapproved_dm = serde_json::json!({
+            "message": {
+                "message_id": 2,
+                "text": "hello",
+                "from": { "id": 7, "username": "group-member" },
+                "chat": { "id": 7, "type": "private" }
+            }
+        });
+        assert!(
+            ch.parse_update_message(&unapproved_dm).is_none(),
+            "group authorization must not authorize the sender's direct messages"
+        );
+
+        let approved_dm = serde_json::json!({
+            "message": {
+                "message_id": 3,
+                "text": "hello",
+                "from": { "id": 8, "username": "approved-dm" },
+                "chat": { "id": 8, "type": "private" }
+            }
+        });
+        assert!(ch.parse_update_message(&approved_dm).is_some());
+    }
+
+    #[test]
+    fn empty_allowed_groups_preserve_existing_group_peer_authorization() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "home",
+            Arc::new(|| vec!["approved-member".into()]),
+            false,
+        )
+        .with_allowed_groups_resolver(Arc::new(Vec::new));
+
+        let approved = group_text_update(-100_200_300, "approved-member", "hello");
+        assert!(ch.parse_update_message(&approved).is_some());
+
+        let unapproved = group_text_update(-100_200_300, "unapproved-member", "hello");
+        assert!(ch.parse_update_message(&unapproved).is_none());
+    }
+
+    #[test]
+    fn mention_only_runs_after_group_authorization() {
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(Vec::new), true)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]));
+        *ch.bot_username.lock() = Some("mybot".to_string());
+
+        let allowed_without_mention = group_text_update(-100_200_300, "member", "hello");
+        assert!(ch.parse_update_message(&allowed_without_mention).is_none());
+
+        let unlisted_with_mention = group_text_update(-100_200_301, "member", "@mybot hello");
+        assert!(ch.parse_update_message(&unlisted_with_mention).is_none());
+    }
+
+    #[tokio::test]
+    async fn unlisted_group_attachment_skips_telegram_download_requests() {
+        use wiremock::MockServer;
+
+        let mock_server = MockServer::start().await;
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(|| vec!["*".into()]), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_api_base(mock_server.uri())
+            .with_workspace_dir(workspace.path().to_path_buf());
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 4,
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" },
+                "document": { "file_id": "document-file", "file_name": "report.txt" }
+            }
+        });
+
+        assert!(ch.try_parse_attachment_message(&update).await.is_none());
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unlisted_group_voice_skips_telegram_download_requests() {
+        use wiremock::MockServer;
+
+        let mock_server = MockServer::start().await;
+        let transcription = zeroclaw_config::schema::TranscriptionConfig {
+            enabled: true,
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(|| vec!["*".into()]), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_api_base(mock_server.uri())
+            .with_transcription(transcription);
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 5,
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" },
+                "voice": { "file_id": "voice-file", "duration": 4 }
+            }
+        });
+
+        assert!(ch.try_parse_voice_message(&update).await.is_none());
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unlisted_group_listener_skips_pairing_ack_typing_and_dispatch() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let ch = TelegramChannel::new("token".into(), "home", Arc::new(Vec::new), false)
+            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+            .with_ack_reactions(true)
+            .with_api_base(mock_server.uri());
+        let pairing_code = ch
+            .pairing
+            .as_ref()
+            .and_then(PairingGuard::pairing_code)
+            .expect("channel without peers starts pairing");
+        let update = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 6,
+                "text": format!("/bind {pairing_code}"),
+                "from": { "id": 7, "username": "member" },
+                "chat": { "id": -100_200_301, "type": "supergroup" }
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 0,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [] })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bot[^/]+/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 30,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [update] })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let listener = ch.listen(tx);
+        tokio::pin!(listener);
+        tokio::select! {
+            result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let requests = mock_server.received_requests().await.unwrap();
+                    if requests.iter().any(|request| {
+                        let body = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+                        request.url.path() == "/bottoken/getUpdates"
+                            && body.as_ref().and_then(|body| body.get("timeout"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(30)
+                            && body.as_ref().and_then(|body| body.get("offset"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(2)
+                    }) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => match result {
+                Ok(()) => {}
+                Err(_) => panic!(
+                    "listener did not advance past the unlisted group: {:?}",
+                    mock_server.received_requests().await.unwrap()
+                ),
+            }
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "unlisted group must not reach dispatch"
+        );
+        let requests = mock_server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|request| {
+            !matches!(
+                request.url.path(),
+                "/bottoken/sendMessage"
+                    | "/bottoken/setMessageReaction"
+                    | "/bottoken/sendChatAction"
+            )
+        }));
     }
 
     #[test]

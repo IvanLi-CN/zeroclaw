@@ -2112,14 +2112,17 @@ fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatM
     }
 }
 
-/// Extract tool-call (assistant with tool_call content) and tool-result
-/// messages from the current turn in the LLM history, excluding the final
-/// assistant text response.  "Current turn" = everything after the last
-/// user-role message.
+/// Extract tool-call and tool-result messages from the current turn in the
+/// LLM history, excluding the final assistant text response. Prompt-mode tool
+/// results use a `[Tool results]` user message, so only an ordinary user
+/// message starts a new turn.
 fn extract_current_turn_tool_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
-    // Find the index of the last user message — tool messages for the
-    // current turn come after it.
-    let last_user_idx = history.iter().rposition(|m| m.role == "user").unwrap_or(0);
+    let last_user_idx = history
+        .iter()
+        .rposition(|message| {
+            message.role == "user" && !is_prompt_tool_results_content(&message.content)
+        })
+        .unwrap_or(0);
 
     let tail = &history[last_user_idx + 1..];
     if tail.is_empty() {
@@ -2136,9 +2139,17 @@ fn extract_current_turn_tool_messages(history: &[ChatMessage]) -> Vec<ChatMessag
 
     tail[..end]
         .iter()
-        .filter(|m| m.role == "assistant" || m.role == "tool")
+        .filter(|message| {
+            message.role == "assistant"
+                || message.role == "tool"
+                || (message.role == "user" && is_prompt_tool_results_content(&message.content))
+        })
         .cloned()
         .collect()
+}
+
+fn is_prompt_tool_results_content(content: &str) -> bool {
+    content.trim_start().starts_with("[Tool results]")
 }
 
 fn rollback_orphan_user_turn(
@@ -3252,6 +3263,13 @@ fn parse_reply_intent(response: &str) -> AssistantChannelOutcome {
         ("NO_REPLY[REFUSE]:", NoReplyKind::Refused),
         ("NO_REPLY[FAIL]:", NoReplyKind::Failed),
     ] {
+        let bare_tag = tag.strip_suffix(':').unwrap_or(tag);
+        if trimmed.eq_ignore_ascii_case(bare_tag) {
+            return AssistantChannelOutcome::NoReply {
+                kind: *kind,
+                reason: None,
+            };
+        }
         if let Some(reason) = trimmed.strip_prefix(tag) {
             return outcome_for_no_reply(reason.trim(), *kind);
         }
@@ -3778,6 +3796,28 @@ fn ensure_nonempty_channel_reply(
         "channel_reply_empty; substituting fallback"
     );
     EMPTY_CHANNEL_REPLY_FALLBACK.to_string()
+}
+
+/// A successful sticker is visible output already. Preserve an intentional
+/// informational no-reply marker so the normal empty-text guard does not send
+/// an unrelated fallback message after a sticker-only Telegram response.
+fn should_suppress_sticker_only_reply(successful_sticker_sends: usize, response: &str) -> bool {
+    successful_sticker_sends > 0
+        && matches!(
+            parse_reply_intent(response),
+            AssistantChannelOutcome::NoReply {
+                kind: NoReplyKind::Informational,
+                ..
+            }
+        )
+}
+
+fn sticker_only_reply_history_marker(
+    successful_sticker_sends: usize,
+    response: &str,
+) -> Option<String> {
+    should_suppress_sticker_only_reply(successful_sticker_sends, response)
+        .then(|| parse_reply_intent(response).history_marker())
 }
 
 /// Remove leading lines that narrate tool usage (e.g. "Let me check the weather for you.").
@@ -5410,6 +5450,23 @@ async fn process_channel_message_body(
     // handle) keeps concurrent same-agent turns from reading each other's routes.
     let turn_routing: tools::TurnRoutingHandle =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // The sticker tool is only usable while handling an actual Telegram turn.
+    // This context holds the one-turn successful-send quota and the reply target;
+    // tool registration itself remains global so live configuration can take effect.
+    let telegram_sticker_context = (msg.channel == "telegram")
+        .then_some(msg.channel_alias.as_deref())
+        .flatten()
+        .map(|alias| tools::TelegramStickerTurnContext::new(alias, msg.reply_target.clone()));
+    let telegram_immediate_delivery_context = (msg.channel == "telegram")
+        .then_some(target_channel.as_ref())
+        .flatten()
+        .map(|channel| {
+            tools::ImmediateDeliveryContext::new(
+                std::sync::Arc::clone(channel),
+                msg.reply_target.clone(),
+                msg.thread_ts.clone(),
+            )
+        });
 
     let tool_receipts_collector: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -5537,6 +5594,10 @@ async fn process_channel_message_body(
             // which share one SendViaTool, never read each other's routes.
             let tool_loop =
                 tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
+            let tool_loop = tools::TURN_TELEGRAM_STICKER_CONTEXT
+                .scope(telegram_sticker_context.clone(), tool_loop);
+            let tool_loop = tools::TURN_IMMEDIATE_DELIVERY
+                .scope(telegram_immediate_delivery_context.clone(), tool_loop);
             let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
                 .scope(thinking.params.native_thinking, tool_loop);
             let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
@@ -5760,6 +5821,44 @@ async fn process_channel_message_body(
             }
         }
         LlmExecutionResult::Completed(Ok(Ok(response))) => {
+            let successful_sticker_sends = match telegram_sticker_context.as_ref() {
+                Some(context) => context.successful_sends().await,
+                None => 0,
+            };
+            if let Some(history_marker) =
+                sticker_only_reply_history_marker(successful_sticker_sends, &response)
+            {
+                // A sticker-only reply already has visible Telegram output. Do
+                // not replace the intentional informational no-reply marker with
+                // the generic empty-text fallback message.
+                if let (Some(channel), Some(draft_id)) =
+                    (target_channel.as_ref(), draft_message_id.as_deref())
+                {
+                    let _ = channel.cancel_draft(&msg.reply_target, draft_id).await;
+                }
+                let keep_tool_turns = ctx.agent_cfg.resolved.keep_tool_context_turns;
+                if keep_tool_turns > 0 {
+                    let tool_messages: Vec<ChatMessage> =
+                        extract_current_turn_tool_messages(&history);
+                    for tool_msg in tool_messages {
+                        append_sender_turn(ctx.as_ref(), &history_key, tool_msg);
+                    }
+                }
+                append_sender_turn(
+                    ctx.as_ref(),
+                    &history_key,
+                    ChatMessage::assistant(&history_marker),
+                );
+                reconcile_early_ack(
+                    ctx.as_ref(),
+                    &msg,
+                    target_channel.as_ref(),
+                    early_ack_task,
+                    Some(reaction_done_emoji),
+                )
+                .await;
+                return;
+            }
             // ── Hook: on_message_sending (modifying) ─────────
             let mut outbound_response = response;
             if let Some(hooks) = &ctx.hooks {
@@ -7419,6 +7518,19 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
             };
+            let allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync> = {
+                let cfg_arc = config_arc.clone();
+                let alias = alias.clone();
+                Arc::new(move || {
+                    cfg_arc
+                        .read()
+                        .channels
+                        .telegram
+                        .get(&alias)
+                        .map(|tg| tg.allowed_groups.clone())
+                        .unwrap_or_default()
+                })
+            };
             let workspace_dir = one_shot_channel_workspace_dir(&config, "telegram", &alias);
             let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
                 let cfg_arc = config_arc.clone();
@@ -7432,6 +7544,7 @@ fn build_channel_by_id(
                     peer_resolver,
                     tg.mention_only,
                 )
+                .with_allowed_groups_resolver(allowed_groups_resolver)
                 .with_voice_peer_resolver(voice_peer_resolver)
                 .with_persistence(config_arc.clone())
                 .with_api_base(tg.api_base_url.clone())
@@ -8572,6 +8685,19 @@ fn collect_configured_channels(
             let alias = alias.clone();
             Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
         };
+        let allowed_groups_resolver: Arc<dyn Fn() -> Vec<i64> + Send + Sync> = {
+            let cfg_arc = config_arc.clone();
+            let alias = alias.clone();
+            Arc::new(move || {
+                cfg_arc
+                    .read()
+                    .channels
+                    .telegram
+                    .get(&alias)
+                    .map(|tg| tg.allowed_groups.clone())
+                    .unwrap_or_default()
+            })
+        };
         let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
             let cfg_arc = config_arc.clone();
             let alias = alias.clone();
@@ -8602,6 +8728,7 @@ fn collect_configured_channels(
                         peer_resolver,
                         tg.mention_only,
                     )
+                    .with_allowed_groups_resolver(allowed_groups_resolver)
                     .with_voice_peer_resolver(voice_peer_resolver)
                     .with_persistence(config_arc.clone())
                     .with_api_base(tg.api_base_url.clone())
@@ -13350,6 +13477,33 @@ api_key = "anthropic-key"
     }
 
     #[test]
+    fn sticker_only_reply_suppression_requires_success_and_info_marker() {
+        assert!(should_suppress_sticker_only_reply(1, "NO_REPLY[INFO]"));
+        assert!(should_suppress_sticker_only_reply(
+            1,
+            "NO_REPLY[INFO]: sticker sent"
+        ));
+        assert!(!should_suppress_sticker_only_reply(
+            0,
+            "NO_REPLY[INFO]: sticker sent"
+        ));
+        assert!(!should_suppress_sticker_only_reply(
+            1,
+            "NO_REPLY[FAIL]: sticker failed"
+        ));
+        assert!(!should_suppress_sticker_only_reply(1, "Thanks!"));
+        assert_eq!(
+            sticker_only_reply_history_marker(1, "NO_REPLY[INFO]: sticker sent"),
+            Some("[No reply sent: sticker sent]".into())
+        );
+        assert_eq!(
+            sticker_only_reply_history_marker(1, "NO_REPLY[INFO]"),
+            Some("[No reply sent]".into())
+        );
+        assert_eq!(sticker_only_reply_history_marker(0, "NO_REPLY[INFO]"), None);
+    }
+
+    #[test]
     fn sanitize_channel_response_strips_used_tools_with_leading_whitespace() {
         let tools: Vec<Box<dyn Tool>> = Vec::new();
         //: response with leading whitespace before [Used tools: ...]
@@ -14000,6 +14154,8 @@ api_key = "anthropic-key"
     #[derive(Default)]
     struct TelegramRecordingChannel {
         sent_messages: tokio::sync::Mutex<Vec<String>>,
+        reactions_added: tokio::sync::Mutex<Vec<(String, String, String)>>,
+        reactions_removed: tokio::sync::Mutex<Vec<(String, String, String)>>,
     }
 
     #[derive(Default)]
@@ -14049,6 +14205,34 @@ api_key = "anthropic-key"
         }
 
         async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            channel_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> anyhow::Result<()> {
+            self.reactions_added.lock().await.push((
+                channel_id.to_string(),
+                message_id.to_string(),
+                emoji.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn remove_reaction(
+            &self,
+            channel_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> anyhow::Result<()> {
+            self.reactions_removed.lock().await.push((
+                channel_id.to_string(),
+                message_id.to_string(),
+                emoji.to_string(),
+            ));
             Ok(())
         }
     }
@@ -15271,6 +15455,54 @@ api_key = "anthropic-key"
     }
 
     struct ToolCallingModelProvider;
+
+    struct StickerOnlyModelProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for StickerOnlyModelProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok(r#"<tool_call>
+{"name":"sticker","arguments":{"emoji":"🔥"}}
+</tool_call>"#
+                .to_string())
+        }
+
+        async fn chat_with_history(
+            &self,
+            messages: &[ChatMessage],
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            if messages
+                .iter()
+                .any(|message| message.content.contains("[Tool results]"))
+            {
+                Ok("NO_REPLY[INFO]: sticker sent".to_string())
+            } else {
+                self.chat_with_system(None, "", "", None).await
+            }
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for StickerOnlyModelProvider {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+
+        fn alias(&self) -> &str {
+            "StickerOnlyModelProvider"
+        }
+    }
 
     fn tool_call_payload() -> String {
         r#"<tool_call>
@@ -20207,6 +20439,112 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(
             sent.is_empty(),
             "informational no-reply must stay silent (reaction only), got {sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_sticker_only_preserves_history_without_text_reply() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottest-token/getStickerSet$"))
+            .and(body_json(serde_json::json!({"name": "mood_pack"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {"stickers": [{"emoji": "🔥", "file_id": "sticker-file-id"}]},
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottest-token/sendSticker$"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "-100200300",
+                "sticker": "sticker-file-id",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let api_base_url = mock_server.uri();
+        let resolver: zeroclaw_runtime::tools::TelegramStickerConfigResolver =
+            Arc::new(move |alias| {
+                (alias == "home").then(|| zeroclaw_runtime::tools::TelegramStickerConfig {
+                    bot_token: "test-token".into(),
+                    api_base_url: api_base_url.clone(),
+                    proxy_url: None,
+                    sticker_sets: vec!["mood_pack".into()],
+                })
+            });
+        let sticker_tool = zeroclaw_runtime::tools::TelegramStickerTool::new(
+            Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+            resolver,
+        );
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut agent_cfg = zeroclaw_config::schema::AliasedAgentConfig::default();
+        agent_cfg.resolved.keep_tool_context_turns = 2;
+        let mut runtime_ctx = test_runtime_ctx_with_observer_and_tools(
+            channel,
+            Arc::new(StickerOnlyModelProvider),
+            zeroclaw_config::schema::Config::default(),
+            agent_cfg,
+            "test-provider",
+            None,
+            Arc::new(NoopObserver),
+            vec![Box::new(sticker_tool)],
+        );
+        Arc::get_mut(&mut runtime_ctx)
+            .expect("test runtime should be uniquely owned")
+            .show_tool_calls = false;
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "sticker-only-msg".to_string(),
+            sender: "alice".to_string(),
+            reply_target: "-100200300".to_string(),
+            content: "send a happy sticker".to_string(),
+            channel: "telegram".into(),
+            channel_alias: Some("home".to_string()),
+            timestamp: 1,
+            ..Default::default()
+        };
+        let history_key = conversation_history_key(&msg);
+
+        process_channel_message(runtime_ctx.clone(), msg, CancellationToken::new()).await;
+
+        let sent_messages = channel_impl.sent_messages.lock().await;
+        assert!(
+            sent_messages.is_empty(),
+            "sticker-only completion must not send fallback text: {sent_messages:?}"
+        );
+        drop(sent_messages);
+        assert!(
+            channel_impl
+                .reactions_removed
+                .lock()
+                .await
+                .iter()
+                .any(|reaction| reaction.2 == "👀"),
+            "sticker-only completion must reconcile the early acknowledgement"
+        );
+        let histories = runtime_ctx
+            .conversation_histories
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let turns = histories
+            .peek(history_key.as_str())
+            .expect("sticker-only turn should be persisted");
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.role == "tool" || turn.content.contains("[Tool results]")),
+            "successful sticker tool result should remain in history: {turns:?}"
+        );
+        assert_eq!(
+            turns.last().map(|turn| turn.content.as_str()),
+            Some("[No reply sent: sticker sent]")
         );
     }
 
@@ -27295,6 +27633,7 @@ This is an example JSON object for profile settings."#;
                 draft_update_interval_ms: 1000,
                 interrupt_on_new_message: false,
                 mention_only: false,
+                allowed_groups: vec![],
                 ack_reactions: None,
                 proxy_url: None,
                 approval_timeout_secs: 120,
@@ -27324,6 +27663,7 @@ This is an example JSON object for profile settings."#;
                 draft_update_interval_ms: 1000,
                 interrupt_on_new_message: false,
                 mention_only: false,
+                allowed_groups: vec![],
                 ack_reactions: None,
                 proxy_url: None,
                 approval_timeout_secs: 120,
@@ -28603,6 +28943,44 @@ Done."#;
         assert_eq!(tool_msgs[0].role, "assistant");
         assert!(tool_msgs[0].content.contains("tool_call"));
         assert_eq!(tool_msgs[1].role, "tool");
+    }
+
+    #[test]
+    fn extract_current_turn_tool_messages_preserves_prompt_mode_results() {
+        let history = vec![
+            ChatMessage::user("send a sticker"),
+            ChatMessage::assistant(r#"{"tool_call":"sticker"}"#),
+            ChatMessage::user("[Tool results]\nsticker sent"),
+            ChatMessage::assistant("NO_REPLY[INFO]: sticker sent"),
+        ];
+
+        let tool_messages = extract_current_turn_tool_messages(&history);
+        assert_eq!(tool_messages.len(), 2);
+        assert_eq!(tool_messages[0].role, "assistant");
+        assert!(tool_messages[1].content.contains("[Tool results]"));
+    }
+
+    #[test]
+    fn extract_current_turn_tool_messages_treats_quoted_marker_as_user_boundary() {
+        let history = vec![
+            ChatMessage::user("older request"),
+            ChatMessage::assistant(r#"{"tool_call":"shell"}"#),
+            ChatMessage::user("[Tool results]\nold result"),
+            ChatMessage::assistant("older reply"),
+            ChatMessage::user("Why does the output contain [Tool results]?"),
+            ChatMessage::assistant(r#"{"tool_call":"sticker"}"#),
+            ChatMessage::user("[Tool results]\nsticker sent"),
+            ChatMessage::assistant("NO_REPLY[INFO]: sticker sent"),
+        ];
+
+        let tool_messages = extract_current_turn_tool_messages(&history);
+        assert_eq!(tool_messages.len(), 2);
+        assert!(
+            !tool_messages
+                .iter()
+                .any(|message| message.content.contains("old result"))
+        );
+        assert!(tool_messages[1].content.contains("sticker sent"));
     }
 
     #[test]
