@@ -2119,7 +2119,9 @@ fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatM
 fn extract_current_turn_tool_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
     let last_user_idx = history
         .iter()
-        .rposition(|message| message.role == "user" && !message.content.contains("[Tool results]"))
+        .rposition(|message| {
+            message.role == "user" && !is_prompt_tool_results_content(&message.content)
+        })
         .unwrap_or(0);
 
     let tail = &history[last_user_idx + 1..];
@@ -2140,10 +2142,14 @@ fn extract_current_turn_tool_messages(history: &[ChatMessage]) -> Vec<ChatMessag
         .filter(|message| {
             message.role == "assistant"
                 || message.role == "tool"
-                || (message.role == "user" && message.content.contains("[Tool results]"))
+                || (message.role == "user" && is_prompt_tool_results_content(&message.content))
         })
         .cloned()
         .collect()
+}
+
+fn is_prompt_tool_results_content(content: &str) -> bool {
+    content.trim_start().starts_with("[Tool results]")
 }
 
 fn rollback_orphan_user_turn(
@@ -28952,6 +28958,29 @@ Done."#;
         assert_eq!(tool_messages.len(), 2);
         assert_eq!(tool_messages[0].role, "assistant");
         assert!(tool_messages[1].content.contains("[Tool results]"));
+    }
+
+    #[test]
+    fn extract_current_turn_tool_messages_treats_quoted_marker_as_user_boundary() {
+        let history = vec![
+            ChatMessage::user("older request"),
+            ChatMessage::assistant(r#"{"tool_call":"shell"}"#),
+            ChatMessage::user("[Tool results]\nold result"),
+            ChatMessage::assistant("older reply"),
+            ChatMessage::user("Why does the output contain [Tool results]?"),
+            ChatMessage::assistant(r#"{"tool_call":"sticker"}"#),
+            ChatMessage::user("[Tool results]\nsticker sent"),
+            ChatMessage::assistant("NO_REPLY[INFO]: sticker sent"),
+        ];
+
+        let tool_messages = extract_current_turn_tool_messages(&history);
+        assert_eq!(tool_messages.len(), 2);
+        assert!(
+            !tool_messages
+                .iter()
+                .any(|message| message.content.contains("old result"))
+        );
+        assert!(tool_messages[1].content.contains("sticker sent"));
     }
 
     #[test]
