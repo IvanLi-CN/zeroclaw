@@ -11,6 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github/workflows/release-stable-manual.yml"
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
+DOCKER_WORKFLOW_PATH = ROOT / ".github/workflows/docker-publish.yml"
+DOCKER_WORKFLOW = DOCKER_WORKFLOW_PATH.read_text(encoding="utf-8")
+TRIVY_WORKFLOW = (ROOT / ".github/workflows/trivy-scheduled.yml").read_text(
+    encoding="utf-8"
+)
 INSTALLER = (ROOT / "install.sh").read_text(encoding="utf-8")
 WINDOWS_INSTALLER = (ROOT / "setup.bat").read_text(encoding="utf-8")
 
@@ -173,6 +178,28 @@ class ReleaseAttestationContractTest(unittest.TestCase):
         )
         self.assertEqual(self.docker.count("cosign sign --yes"), 2)
         self.assertNotIn("cosign", self.publish)
+
+    def test_ghcr_image_names_are_normalized_from_the_repository(self) -> None:
+        for workflow in (WORKFLOW, DOCKER_WORKFLOW, TRIVY_WORKFLOW):
+            with self.subTest(workflow=workflow[:40]):
+                self.assertIn("${GITHUB_REPOSITORY,,}", workflow)
+                self.assertNotRegex(
+                    workflow,
+                    r"(?m)^  IMAGE(?:_NAME)?: \$\{\{ github\.repository \}\}$",
+                )
+
+    def test_existing_release_docker_recovery_is_immutable_and_verified(self) -> None:
+        required = (
+            "release_ref:",
+            "publish_prebuilt:",
+            'git rev-parse "${release_ref}^{commit}"',
+            'gh release download "$release_ref"',
+            "sha256sum --check --ignore-missing SHA256SUMS",
+            "${{ needs.matrix.outputs.release_ref }}-debian",
+        )
+        for value in required:
+            with self.subTest(value=value):
+                self.assertIn(value, DOCKER_WORKFLOW)
 
 
 if __name__ == "__main__":

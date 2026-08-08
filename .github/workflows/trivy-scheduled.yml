@@ -27,7 +27,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ${{ github.repository }}
 
 jobs:
   scan:
@@ -45,6 +44,10 @@ jobs:
             floating_tag: default-features
 
     steps:
+      - name: Resolve lowercase GHCR image name
+        shell: bash
+        run: echo "IMAGE=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Log in to GHCR
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:

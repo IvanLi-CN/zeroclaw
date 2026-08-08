@@ -10,6 +10,7 @@ on:
       - .dockerignore
       - dev/config.template.toml
       - .github/workflows/docker-image-pr.yml
+      - .github/workflows/docker-publish.yml
       - .github/workflows/release-stable-manual.yml
       - scripts/ci/prepare_docker_context.sh
 

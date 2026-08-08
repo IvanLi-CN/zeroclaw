@@ -74,7 +74,21 @@ Runs only when Docker image or release-Docker context files change. It prepares 
 
 ### Docker Publish (`docker-publish.yml`)
 
-Builds, signs, and scans the generated four-variant matrix from `dev/ci/docker-tags.toml`: `minimal`, `default-features`, `dist`, and `all-features`. A human-created `v*` tag starts this workflow directly. A stable release started with `workflow_dispatch` creates its tag with `GITHUB_TOKEN`, which does not emit another tag-push event, so `release-stable-manual.yml` calls Docker Publish synchronously at the immutable release tag after the canonical release and Docker jobs succeed.
+Builds, signs, and scans the generated four-variant matrix from
+`dev/ci/docker-tags.toml`: `minimal`, `default-features`, `dist`, and
+`all-features`. A human-created `v*` tag starts this workflow directly. A
+stable release started with `workflow_dispatch` creates its tag with
+`GITHUB_TOKEN`, which does not emit another tag-push event, so
+`release-stable-manual.yml` calls Docker Publish synchronously at the immutable
+release tag after the canonical release and Docker jobs succeed.
+
+Manual dispatch requires an existing immutable `release_ref`. Enable
+`publish_prebuilt` only to recover Docker publication for an existing GitHub
+Release: the workflow checks that the tag, workspace version, and generated tag
+matrix agree, downloads the two Linux release archives, verifies them against
+the published `SHA256SUMS`, and then publishes the prebuilt tags alongside the
+normal variant matrix. GHCR image names are derived from `GITHUB_REPOSITORY`
+and normalized to lowercase before use.
 
 This matrix supplements rather than replaces the stable release's prebuilt `latest`, versioned, and `debian` images. The two paths use different build inputs and publish distinct tags.
 
