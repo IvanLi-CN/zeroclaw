@@ -207,6 +207,10 @@ class ReleaseAttestationContractTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIn(value, DOCKER_WORKFLOW)
 
+        matrix_gate = DOCKER_WORKFLOW.index('if [[ "$EVENT_NAME" == "workflow_dispatch" ]]')
+        first_registry_write = DOCKER_WORKFLOW.index("  publish:")
+        self.assertLess(matrix_gate, first_registry_write)
+
 
 if __name__ == "__main__":
     unittest.main()

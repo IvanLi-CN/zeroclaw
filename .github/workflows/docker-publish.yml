@@ -68,6 +68,8 @@ jobs:
         id: resolve
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_REF: ${{ inputs.release_ref || github.ref_name }}
         run: |
           set -euo pipefail
@@ -78,6 +80,14 @@ jobs:
           fi
 
           source_digest="$(git rev-parse "${release_ref}^{commit}")"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            latest_release_ref="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+            if [[ "$release_ref" != "$latest_release_ref" ]]; then
+              echo "::error::Refusing to update floating tags from ${release_ref}; latest stable release is ${latest_release_ref}"
+              exit 1
+            fi
+          fi
+
           version="${release_ref#v}"
           cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           matrix_version="$(yq -r '.version' dev/ci/docker-tags.toml)"
