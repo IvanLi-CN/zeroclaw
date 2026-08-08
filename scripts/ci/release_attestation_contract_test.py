@@ -11,6 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github/workflows/release-stable-manual.yml"
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
+DOCKER_WORKFLOW_PATH = ROOT / ".github/workflows/docker-publish.yml"
+DOCKER_WORKFLOW = DOCKER_WORKFLOW_PATH.read_text(encoding="utf-8")
+TRIVY_WORKFLOW = (ROOT / ".github/workflows/trivy-scheduled.yml").read_text(
+    encoding="utf-8"
+)
 INSTALLER = (ROOT / "install.sh").read_text(encoding="utf-8")
 WINDOWS_INSTALLER = (ROOT / "setup.bat").read_text(encoding="utf-8")
 
@@ -173,6 +178,38 @@ class ReleaseAttestationContractTest(unittest.TestCase):
         )
         self.assertEqual(self.docker.count("cosign sign --yes"), 2)
         self.assertNotIn("cosign", self.publish)
+
+    def test_ghcr_image_names_are_normalized_from_the_repository(self) -> None:
+        for workflow in (WORKFLOW, DOCKER_WORKFLOW, TRIVY_WORKFLOW):
+            with self.subTest(workflow=workflow[:40]):
+                self.assertIn("${GITHUB_REPOSITORY,,}", workflow)
+                self.assertNotRegex(
+                    workflow,
+                    r"(?m)^  IMAGE(?:_NAME)?: \$\{\{ github\.repository \}\}$",
+                )
+
+    def test_existing_release_docker_recovery_is_immutable_and_verified(self) -> None:
+        required = (
+            "release_ref:",
+            "publish_prebuilt:",
+            'source_digest="$(git rev-parse "${release_ref}^{commit}")"',
+            'releases/latest" --jq .tag_name',
+            'if [[ "$release_ref" != "$latest_release_ref" ]]',
+            'gh release download "$release_ref"',
+            "SHA256SUMS must contain exactly one entry",
+            "gh attestation verify SHA256SUMS",
+            'gh attestation verify "$archive"',
+            '--signer-workflow "$SIGNER_WORKFLOW"',
+            '--source-digest "$SOURCE_DIGEST"',
+            "${{ needs.matrix.outputs.release_ref }}-debian",
+        )
+        for value in required:
+            with self.subTest(value=value):
+                self.assertIn(value, DOCKER_WORKFLOW)
+
+        matrix_gate = DOCKER_WORKFLOW.index('if [[ "$EVENT_NAME" == "workflow_dispatch" ]]')
+        first_registry_write = DOCKER_WORKFLOW.index("  publish:")
+        self.assertLess(matrix_gate, first_registry_write)
 
 
 if __name__ == "__main__":

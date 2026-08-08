@@ -26,7 +26,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   validate:
@@ -35,6 +34,7 @@ jobs:
     outputs:
       tag: ${{ steps.check.outputs.tag }}
       version: ${{ steps.check.outputs.version }}
+      image_name: ${{ steps.check.outputs.image_name }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Validate semver and Cargo.toml match
@@ -67,6 +67,12 @@ jobs:
           fi
 
           tag="v${input_version}"
+          image_name="${GITHUB_REPOSITORY,,}"
+
+          if [[ ! "$image_name" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]]; then
+            echo "::error::Invalid normalized GHCR image name: ${image_name}"
+            exit 1
+          fi
 
           # Only check tag existence for manual dispatch (tag push means it already exists)
           if [[ "$EVENT_NAME" != "push" ]]; then
@@ -76,8 +82,11 @@ jobs:
             fi
           fi
 
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${input_version}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${tag}"
+            echo "version=${input_version}"
+            echo "image_name=${image_name}"
+          } >> "$GITHUB_OUTPUT"
 
   web:
     name: Build Web Dashboard
@@ -1140,8 +1149,8 @@ jobs:
           context: docker-ctx
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ needs.validate.outputs.image_name }}:${{ needs.validate.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ needs.validate.outputs.image_name }}:latest
           platforms: linux/amd64,linux/arm64
 
       - name: Sign container image (keyless / Rekor)
@@ -1149,12 +1158,12 @@ jobs:
         # Consumers verify with:
         #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
         #     --certificate-identity-regexp "^https://github.com/IvanLi-CN/zeroclaw/" \
-        #     ghcr.io/IvanLi-CN/zeroclaw@<digest>
+        #     ghcr.io/ivanli-cn/zeroclaw@<digest>
         env:
           DIGEST: ${{ steps.build-push.outputs.digest }}
         run: |
           cosign sign --yes \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+            "${{ env.REGISTRY }}/${{ needs.validate.outputs.image_name }}@${DIGEST}"
 
       - name: Build and push Debian compatibility image
         id: build-push-debian
@@ -1166,8 +1175,8 @@ jobs:
             VARIANT=debian
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}-debian
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:debian
+            ${{ env.REGISTRY }}/${{ needs.validate.outputs.image_name }}:${{ needs.validate.outputs.tag }}-debian
+            ${{ env.REGISTRY }}/${{ needs.validate.outputs.image_name }}:debian
           platforms: linux/amd64,linux/arm64
 
       - name: Sign Debian container image (keyless / Rekor)
@@ -1175,4 +1184,4 @@ jobs:
           DIGEST: ${{ steps.build-push-debian.outputs.digest }}
         run: |
           cosign sign --yes \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+            "${{ env.REGISTRY }}/${{ needs.validate.outputs.image_name }}@${DIGEST}"

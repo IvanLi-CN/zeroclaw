@@ -28,7 +28,7 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 |---|---|---|
 | `ci.yml` | `pull_request` → `master`; `push` → `master`; `merge_group` (dormant) | Lint + test + build on PRs and trusted post-merge cache-warming runs. The `merge_group` trigger stays wired but never fires while the merge queue is disabled. |
 | `release-stable-manual.yml` | `workflow_dispatch`, tag push `v*` | Stable release (manual, version-gated) |
-| `docker-publish.yml` | `workflow_call`, `workflow_dispatch`, tag push `v*` | Build, sign, and scan the generated Docker variant matrix |
+| `docker-publish.yml` | `workflow_call`, `workflow_dispatch`, tag push `v*` | Build, sign, and scan the generated Docker variant matrix; optionally recover prebuilt tags for an existing release |
 | `trivy-scheduled.yml` | `workflow_dispatch`; weekly schedule | Re-scan published `dist` and `default-features` images for new CVEs |
 | `cross-platform-build-manual.yml` | `workflow_dispatch` | Full platform build matrix (manual smoke check) |
 | `cross-platform-clippy.yml` | `workflow_dispatch`; weekly schedule | Advisory macOS/Windows Clippy coverage, outside the required PR gate |

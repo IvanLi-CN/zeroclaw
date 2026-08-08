@@ -424,6 +424,16 @@ confirm that sibling run is green before treating container publication as
 complete. Package-manager publication and social announcements are outside
 this fork's stable release workflow and do not affect release completion.
 
+If the GitHub Release exists but Docker publication failed before any image was
+pushed, merge the workflow fix through a normal PR and manually dispatch
+`docker-publish.yml` from `master`. Set `release_ref` to the existing immutable
+tag and enable `publish_prebuilt`. The tag must be the current latest stable
+Release. This recovery path verifies the checksum file and both Linux archives
+against release attestations bound to the tag commit, checks each archive's
+unique `SHA256SUMS` entry, publishes the prebuilt and generated variant tags,
+and never recreates or moves the existing tag or GitHub Release. Do not dispatch
+the full stable release workflow again for an existing tag.
+
 Consumers who want to verify signatures, SBOMs, or SLSA provenance on the
 published artifacts can follow
 [Release artifact verification](./release-verification.md).

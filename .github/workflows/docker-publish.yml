@@ -20,7 +20,22 @@ on:
         description: "Immutable release tag to build (vX.Y.Z)"
         required: true
         type: string
+      publish_prebuilt:
+        description: "Also publish prebuilt latest/versioned/Debian images from release assets"
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Existing immutable release tag to publish (vX.Y.Z)"
+        required: true
+        type: string
+      publish_prebuilt:
+        description: "Also publish prebuilt latest/versioned/Debian images from release assets"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -33,7 +48,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ${{ github.repository }}
 
 jobs:
   matrix:
@@ -41,10 +55,59 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       include: ${{ steps.read.outputs.include }}
+      image: ${{ steps.resolve.outputs.image }}
+      release_ref: ${{ steps.resolve.outputs.release_ref }}
+      source_digest: ${{ steps.resolve.outputs.source_digest }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ inputs.release_ref || github.ref }}
+          fetch-depth: 0
+      - name: Resolve immutable release identity
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_REF: ${{ inputs.release_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_ref="$REQUESTED_REF"
+          if [[ ! "$release_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release_ref must be an immutable stable tag (vX.Y.Z): ${release_ref}"
+            exit 1
+          fi
+
+          source_digest="$(git rev-parse "${release_ref}^{commit}")"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            latest_release_ref="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+            if [[ "$release_ref" != "$latest_release_ref" ]]; then
+              echo "::error::Refusing to update floating tags from ${release_ref}; latest stable release is ${latest_release_ref}"
+              exit 1
+            fi
+          fi
+
+          version="${release_ref#v}"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          matrix_version="$(yq -r '.version' dev/ci/docker-tags.toml)"
+          if [[ "$cargo_version" != "$version" || "$matrix_version" != "$version" ]]; then
+            echo "::error::Release identity mismatch: tag=${version}, Cargo.toml=${cargo_version}, docker-tags.toml=${matrix_version}"
+            exit 1
+          fi
+
+          image="${GITHUB_REPOSITORY,,}"
+          if [[ ! "$image" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]]; then
+            echo "::error::Invalid normalized GHCR image name: ${image}"
+            exit 1
+          fi
+
+          {
+            echo "release_ref=${release_ref}"
+            echo "source_digest=${source_digest}"
+            echo "version=${version}"
+            echo "image=${image}"
+          } >> "$GITHUB_OUTPUT"
       - name: Read generated docker-tags.toml into a build matrix
         id: read
         run: |
@@ -99,20 +162,128 @@ jobs:
           build-args: |
             ZEROCLAW_CARGO_FLAGS=${{ matrix.flags }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.pinned_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.floating_tag }}
+            ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:${{ matrix.pinned_tag }}
+            ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:${{ matrix.floating_tag }}
 
       - name: Sign container image (keyless / Rekor)
         # Signs by digest so the signature is immutable regardless of tag mutations.
         # Consumers verify with:
         #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
         #     --certificate-identity-regexp "^https://github.com/IvanLi-CN/zeroclaw/" \
-        #     ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build-push.outputs.digest }}
+        #     ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}@${{ steps.build-push.outputs.digest }}
         env:
           DIGEST: ${{ steps.build-push.outputs.digest }}
         run: |
           cosign sign --yes \
-            "${{ env.REGISTRY }}/${{ env.IMAGE }}@${DIGEST}"
+            "${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}@${DIGEST}"
+
+  prebuilt:
+    name: Publish prebuilt release images
+    if: inputs.publish_prebuilt == true
+    needs: [matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.matrix.outputs.release_ref }}
+
+      - name: Download and verify release binaries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REF: ${{ needs.matrix.outputs.release_ref }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/release-stable-manual.yml
+          SOURCE_DIGEST: ${{ needs.matrix.outputs.source_digest }}
+        run: |
+          set -euo pipefail
+          release_ref="$RELEASE_REF"
+          latest_release_ref="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ "$release_ref" != "$latest_release_ref" ]]; then
+            echo "::error::Refusing to update floating tags from ${release_ref}; latest stable release is ${latest_release_ref}"
+            exit 1
+          fi
+
+          mkdir -p release-download artifacts
+          cd release-download
+          gh release download "$release_ref" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS \
+            --pattern zeroclaw-x86_64-unknown-linux-gnu.tar.gz \
+            --pattern zeroclaw-aarch64-unknown-linux-gnu.tar.gz
+
+          required_archives=(
+            zeroclaw-x86_64-unknown-linux-gnu.tar.gz
+            zeroclaw-aarch64-unknown-linux-gnu.tar.gz
+          )
+          gh attestation verify SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-digest "$SOURCE_DIGEST"
+          for archive in "${required_archives[@]}"; do
+            checksum_row="$(awk -v file="$archive" '$2 == file { count++; row=$0 } END { if (count == 1) print row; else exit 1 }' SHA256SUMS)" || {
+              echo "::error::SHA256SUMS must contain exactly one entry for ${archive}"
+              exit 1
+            }
+            printf '%s\n' "$checksum_row" | sha256sum --check -
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW" \
+              --source-digest "$SOURCE_DIGEST"
+          done
+          cp zeroclaw-*-unknown-linux-gnu.tar.gz ../artifacts/
+          cd ..
+          bash scripts/ci/prepare_docker_context.sh from-artifacts docker-ctx artifacts
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+
+      - name: Build and push prebuilt image
+        id: prebuilt
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: docker-ctx
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:${{ needs.matrix.outputs.release_ref }}
+            ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:latest
+          platforms: linux/amd64,linux/arm64
+
+      - name: Sign prebuilt image
+        env:
+          DIGEST: ${{ steps.prebuilt.outputs.digest }}
+        run: cosign sign --yes "${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}@${DIGEST}"
+
+      - name: Build and push Debian compatibility image
+        id: prebuilt-debian
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: docker-ctx
+          file: docker-ctx/Dockerfile
+          build-args: VARIANT=debian
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:${{ needs.matrix.outputs.release_ref }}-debian
+            ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:debian
+          platforms: linux/amd64,linux/arm64
+
+      - name: Sign Debian compatibility image
+        env:
+          DIGEST: ${{ steps.prebuilt-debian.outputs.digest }}
+        run: cosign sign --yes "${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}@${DIGEST}"
 
   scan:
     name: Scan ${{ matrix.stem }}
@@ -139,7 +310,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           skip-dirs: /usr/share/zoneinfo
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.pinned_tag }}
+          image-ref: ${{ env.REGISTRY }}/${{ needs.matrix.outputs.image }}:${{ matrix.pinned_tag }}
           format: sarif
           output: trivy-results.sarif
           exit-code: 0
