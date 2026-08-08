@@ -57,6 +57,7 @@ jobs:
       include: ${{ steps.read.outputs.include }}
       image: ${{ steps.resolve.outputs.image }}
       release_ref: ${{ steps.resolve.outputs.release_ref }}
+      source_digest: ${{ steps.resolve.outputs.source_digest }}
       version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -76,7 +77,7 @@ jobs:
             exit 1
           fi
 
-          git rev-parse "${release_ref}^{commit}" >/dev/null
+          source_digest="$(git rev-parse "${release_ref}^{commit}")"
           version="${release_ref#v}"
           cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           matrix_version="$(yq -r '.version' dev/ci/docker-tags.toml)"
@@ -93,6 +94,7 @@ jobs:
 
           {
             echo "release_ref=${release_ref}"
+            echo "source_digest=${source_digest}"
             echo "version=${version}"
             echo "image=${image}"
           } >> "$GITHUB_OUTPUT"
@@ -173,6 +175,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      attestations: read
       packages: write
       id-token: write
     steps:
@@ -185,9 +188,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_REF: ${{ needs.matrix.outputs.release_ref }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/release-stable-manual.yml
+          SOURCE_DIGEST: ${{ needs.matrix.outputs.source_digest }}
         run: |
           set -euo pipefail
           release_ref="$RELEASE_REF"
+          latest_release_ref="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ "$release_ref" != "$latest_release_ref" ]]; then
+            echo "::error::Refusing to update floating tags from ${release_ref}; latest stable release is ${latest_release_ref}"
+            exit 1
+          fi
+
           mkdir -p release-download artifacts
           cd release-download
           gh release download "$release_ref" \
@@ -195,7 +206,26 @@ jobs:
             --pattern SHA256SUMS \
             --pattern zeroclaw-x86_64-unknown-linux-gnu.tar.gz \
             --pattern zeroclaw-aarch64-unknown-linux-gnu.tar.gz
-          sha256sum --check --ignore-missing SHA256SUMS
+
+          required_archives=(
+            zeroclaw-x86_64-unknown-linux-gnu.tar.gz
+            zeroclaw-aarch64-unknown-linux-gnu.tar.gz
+          )
+          gh attestation verify SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-digest "$SOURCE_DIGEST"
+          for archive in "${required_archives[@]}"; do
+            checksum_row="$(awk -v file="$archive" '$2 == file { count++; row=$0 } END { if (count == 1) print row; else exit 1 }' SHA256SUMS)" || {
+              echo "::error::SHA256SUMS must contain exactly one entry for ${archive}"
+              exit 1
+            }
+            printf '%s\n' "$checksum_row" | sha256sum --check -
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW" \
+              --source-digest "$SOURCE_DIGEST"
+          done
           cp zeroclaw-*-unknown-linux-gnu.tar.gz ../artifacts/
           cd ..
           bash scripts/ci/prepare_docker_context.sh from-artifacts docker-ctx artifacts

@@ -84,11 +84,13 @@ release tag after the canonical release and Docker jobs succeed.
 
 Manual dispatch requires an existing immutable `release_ref`. Enable
 `publish_prebuilt` only to recover Docker publication for an existing GitHub
-Release: the workflow checks that the tag, workspace version, and generated tag
-matrix agree, downloads the two Linux release archives, verifies them against
-the published `SHA256SUMS`, and then publishes the prebuilt tags alongside the
-normal variant matrix. GHCR image names are derived from `GITHUB_REPOSITORY`
-and normalized to lowercase before use.
+Release: the workflow requires that tag to be the current latest stable Release,
+checks that the tag, workspace version, and generated tag matrix agree, and
+downloads the two Linux release archives. It verifies the checksum file and
+both archives against release attestations bound to the tag commit, then checks
+that each archive has exactly one valid `SHA256SUMS` entry before publishing the
+prebuilt tags alongside the normal variant matrix. GHCR image names are derived
+from `GITHUB_REPOSITORY` and normalized to lowercase before use.
 
 This matrix supplements rather than replaces the stable release's prebuilt `latest`, versioned, and `debian` images. The two paths use different build inputs and publish distinct tags.
 

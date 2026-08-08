@@ -192,9 +192,15 @@ class ReleaseAttestationContractTest(unittest.TestCase):
         required = (
             "release_ref:",
             "publish_prebuilt:",
-            'git rev-parse "${release_ref}^{commit}"',
+            'source_digest="$(git rev-parse "${release_ref}^{commit}")"',
+            'releases/latest" --jq .tag_name',
+            'if [[ "$release_ref" != "$latest_release_ref" ]]',
             'gh release download "$release_ref"',
-            "sha256sum --check --ignore-missing SHA256SUMS",
+            "SHA256SUMS must contain exactly one entry",
+            "gh attestation verify SHA256SUMS",
+            'gh attestation verify "$archive"',
+            '--signer-workflow "$SIGNER_WORKFLOW"',
+            '--source-digest "$SOURCE_DIGEST"',
             "${{ needs.matrix.outputs.release_ref }}-debian",
         )
         for value in required:
