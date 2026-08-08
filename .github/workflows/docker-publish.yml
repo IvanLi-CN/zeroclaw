@@ -55,7 +55,7 @@ jobs:
 
   publish:
     name: Build & push ${{ matrix.stem }}
-    if: github.repository == 'zeroclaw-labs/zeroclaw'
+    if: github.repository == 'IvanLi-CN/zeroclaw'
     needs: [matrix]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -106,7 +106,7 @@ jobs:
         # Signs by digest so the signature is immutable regardless of tag mutations.
         # Consumers verify with:
         #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-        #     --certificate-identity-regexp "^https://github.com/zeroclaw-labs/zeroclaw/" \
+        #     --certificate-identity-regexp "^https://github.com/IvanLi-CN/zeroclaw/" \
         #     ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build-push.outputs.digest }}
         env:
           DIGEST: ${{ steps.build-push.outputs.digest }}
@@ -116,7 +116,7 @@ jobs:
 
   scan:
     name: Scan ${{ matrix.stem }}
-    if: github.repository == 'zeroclaw-labs/zeroclaw'
+    if: github.repository == 'IvanLi-CN/zeroclaw'
     needs: [matrix, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -156,7 +156,7 @@ jobs:
 
   upload-sarif:
     name: Upload SARIF ${{ matrix.stem }}
-    if: github.repository == 'zeroclaw-labs/zeroclaw'
+    if: github.repository == 'IvanLi-CN/zeroclaw'
     needs: [matrix, scan]
     runs-on: ubuntu-latest
     timeout-minutes: 10

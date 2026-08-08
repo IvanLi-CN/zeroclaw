@@ -7,10 +7,10 @@ setlocal enabledelayedexpansion
 :: Usage: setup.bat [--prebuilt | --minimal | --dist | --default | --all | --dry-run | --help]
 :: ============================================================================
 
-set "VERSION=0.8.4"
+set "VERSION=0.8.5"
 set "RUST_MIN_VERSION=1.87"
 set "TARGET=x86_64-pc-windows-msvc"
-set "REPO=https://github.com/zeroclaw-labs/zeroclaw"
+set "REPO=https://github.com/IvanLi-CN/zeroclaw"
 
 :: Colors via ANSI (Windows 10+ Terminal)
 set "GREEN=[32m"
@@ -178,7 +178,7 @@ if %ERRORLEVEL% EQU 0 (
 
 if not defined DOWNLOAD_URL (
     :: Fallback: construct URL from known release pattern
-    set "DOWNLOAD_URL=https://github.com/zeroclaw-labs/zeroclaw/releases/latest/download/zeroclaw-%TARGET%.zip"
+    set "DOWNLOAD_URL=https://github.com/IvanLi-CN/zeroclaw/releases/latest/download/zeroclaw-%TARGET%.zip"
 )
 
 echo   Downloading from release...
@@ -393,7 +393,7 @@ echo   Alternative install via Scoop:
 echo     scoop bucket add zeroclaw https://github.com/zeroclaw-labs/scoop-zeroclaw
 echo     scoop install zeroclaw
 echo.
-echo   Documentation: https://github.com/zeroclaw-labs/zeroclaw
+echo   Documentation: https://github.com/IvanLi-CN/zeroclaw
 echo.
 goto :end
 

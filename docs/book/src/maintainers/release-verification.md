@@ -23,12 +23,13 @@ it against the release workflow and source commit:
 VERSION=vX.Y.Z
 SOURCE_DIGEST=<40-character-release-commit>
 ASSET=zeroclaw-x86_64-unknown-linux-gnu.tar.gz
+REPOSITORY=IvanLi-CN/zeroclaw
 
-gh release download "$VERSION" --repo zeroclaw-labs/zeroclaw \
+gh release download "$VERSION" --repo "$REPOSITORY" \
   --pattern "$ASSET"
 gh attestation verify "$ASSET" \
-  --repo zeroclaw-labs/zeroclaw \
-  --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \
+  --repo "$REPOSITORY" \
+  --signer-workflow "$REPOSITORY/.github/workflows/release-stable-manual.yml" \
   --source-digest "$SOURCE_DIGEST"
 ```
 
@@ -59,19 +60,20 @@ VERSION=vX.Y.Z
 SOURCE_DIGEST=<40-character-release-commit>
 ASSET=zeroclaw-x86_64-unknown-linux-gnu.tar.gz
 VERIFY_ARCHIVE="zeroclaw-${VERSION}-verification.tar.gz"
+REPOSITORY=IvanLi-CN/zeroclaw
 
-gh release download "$VERSION" --repo zeroclaw-labs/zeroclaw \
+gh release download "$VERSION" --repo "$REPOSITORY" \
   --pattern "$ASSET" \
   --pattern SHA256SUMS \
   --pattern "$VERIFY_ARCHIVE"
 
 gh attestation verify "$VERIFY_ARCHIVE" \
-  --repo zeroclaw-labs/zeroclaw \
-  --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \
+  --repo "$REPOSITORY" \
+  --signer-workflow "$REPOSITORY/.github/workflows/release-stable-manual.yml" \
   --source-digest "$SOURCE_DIGEST"
 gh attestation verify SHA256SUMS \
-  --repo zeroclaw-labs/zeroclaw \
-  --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \
+  --repo "$REPOSITORY" \
+  --signer-workflow "$REPOSITORY/.github/workflows/release-stable-manual.yml" \
   --source-digest "$SOURCE_DIGEST"
 
 awk -v file="$VERIFY_ARCHIVE" '$2 == file { print }' SHA256SUMS | sha256sum -c -
@@ -92,8 +94,8 @@ No network request is required when both `--bundle` and
 
 ```bash
 gh attestation verify "$ASSET" \
-  --repo zeroclaw-labs/zeroclaw \
-  --signer-workflow zeroclaw-labs/zeroclaw/.github/workflows/release-stable-manual.yml \
+  --repo "$REPOSITORY" \
+  --signer-workflow "$REPOSITORY/.github/workflows/release-stable-manual.yml" \
   --source-digest "$SOURCE_DIGEST" \
   --bundle "verification/${ASSET}.attestation.jsonl" \
   --custom-trusted-root verification/trusted_root.jsonl
@@ -121,12 +123,12 @@ GHCR container images remain signed by digest with cosign. This is independent
 of the GitHub-attestation path for downloadable release assets.
 
 ```bash
-IMAGE=ghcr.io/zeroclaw-labs/zeroclaw
+IMAGE=ghcr.io/ivanli-cn/zeroclaw
 TAG=vX.Y.Z
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp "^https://github.com/zeroclaw-labs/zeroclaw/" \
+  --certificate-identity-regexp "^https://github.com/IvanLi-CN/zeroclaw/" \
   "${IMAGE}:${TAG}"
 ```
 

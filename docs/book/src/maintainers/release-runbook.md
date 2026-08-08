@@ -8,7 +8,7 @@
 > If anything in here feels heavyweight, that is intentional friction, we do
 > not yet have the automation discipline to remove it safely.
 
-Last verified against the `v0.8.2` release cycle.
+Last verified against the `v0.8.5` release cycle.
 
 ---
 
@@ -22,11 +22,9 @@ Last verified against the `v0.8.2` release cycle.
 6. [Verify the release exists and assets are downloadable](#step-6-verify-the-release)
 7. [Versioned documentation deployment](#step-7-versioned-documentation-deployment)
 
-That is the entire process. Everything else (Docker, website redeploy, Scoop,
-AUR, Discord, tweet) runs automatically as downstream jobs. Homebrew Core
-detects the stable GitHub release through its own autobump service. You do not
-need to do anything for those unless a job explicitly fails or Homebrew's
-external bump remains stale.
+That is the entire process for this repository. Docker images and versioned
+documentation run as downstream jobs. Website redeploy, package-manager sync,
+and social announcements are intentionally outside this fork's release chain.
 
 ---
 
@@ -99,7 +97,7 @@ Then run the release wrapper:
 
 `refresh-translations.sh` reads the version from `Cargo.toml` (nothing typed by
 hand), runs the translation pass, commits and pushes the catalogues to the
-[`zeroclaw-labs/zeroclaw-docs-translations`](https://github.com/zeroclaw-labs/zeroclaw-docs-translations)
+[`IvanLi-CN/zeroclaw-docs-translations`](https://github.com/IvanLi-CN/zeroclaw-docs-translations)
 submodule, cuts the `v{version}` tag there, and stages the main-repo gitlink
 pinned to that tag. It initialises the submodule if it is not already checked
 out. Run it after `bump-version.sh` so the `Cargo.toml` version it reads is the
@@ -319,7 +317,6 @@ Everything else is skipped with a logged reason:
 ```
 ==> skip release-stable-manual:publish (not on dry-run-safe allowlist)
 ==> skip release-stable-manual:docker (not on dry-run-safe allowlist)
-==> skip release-stable-manual:redeploy-website (not on dry-run-safe allowlist)
 ==> skip docs-deploy:deploy (not on dry-run-safe allowlist)
 ==> skip daily-audit:advisories (not on dry-run-safe allowlist)
 ==> skip tweet-release:tweet (not on dry-run-safe allowlist)
@@ -367,7 +364,7 @@ standard PR off master.
 Go to:
 
 ```
-https://github.com/zeroclaw-labs/zeroclaw/actions/workflows/release-stable-manual.yml
+https://github.com/IvanLi-CN/zeroclaw/actions/workflows/release-stable-manual.yml
 ```
 
 Click **Run workflow**. Fill in:
@@ -424,10 +421,8 @@ inside the stable release workflow. You do not need a separate Docker check if
 all release jobs are green. If a maintainer instead starts the release by
 pushing a `vX.Y.Z` tag, Docker Publish starts as a separate tag-triggered run;
 confirm that sibling run is green before treating container publication as
-complete. Scoop and AUR need separate attention only when their jobs show red.
-Homebrew Core is external to this workflow; its
-[autobump service](https://docs.brew.sh/Autobump) checks eligible formulae on
-its own schedule.
+complete. Package-manager publication and social announcements are outside
+this fork's stable release workflow and do not affect release completion.
 
 Consumers who want to verify signatures, SBOMs, or SLSA provenance on the
 published artifacts can follow
@@ -522,15 +517,6 @@ you typed the wrong version. Fix the mismatch and re-trigger.
 
 **An environment gate timed out:** Re-run only the timed-out job. No need to
 restart the workflow.
-
-**A Scoop or AUR distribution job failed:** Each has a corresponding
-manually-triggerable sub-workflow. Re-run the specific one with `dry_run: true`
-first to confirm the fix, then `dry_run: false`. These are nice-to-have: a
-failed distribution job does not invalidate the release itself.
-
-**Homebrew Core is stale:** Homebrew is not a release-workflow job. Check the
-[Homebrew autobump status and documented manual bump
-path](https://docs.brew.sh/Autobump) instead of adding a repository fork token.
 
 ---
 

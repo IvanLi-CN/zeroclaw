@@ -11,7 +11,7 @@
 #   ./scripts/release/refresh-translations.sh 0.8.2 --model-provider llama_cpp.qwen
 #   ./scripts/release/refresh-translations.sh --no-translate
 #
-# Requires push access to zeroclaw-labs/zeroclaw-docs-translations. The submodule
+# Requires push access to IvanLi-CN/zeroclaw-docs-translations. The submodule
 # is initialised automatically if it is not yet checked out.
 set -euo pipefail
 
@@ -147,7 +147,7 @@ fi
 
 if [[ -n "$(git -C "$SUBMODULE_PATH" status --porcelain)" ]]; then
   git -C "$SUBMODULE_PATH" add -A
-  git -C "$SUBMODULE_PATH" commit -m "chore: refresh catalogues for ${TAG}"
+  git -C "$SUBMODULE_PATH" commit --signoff -m "chore: refresh catalogues for ${TAG}"
   git -C "$SUBMODULE_PATH" push origin HEAD:main
 else
   echo "  catalogues unchanged; tagging the current submodule HEAD"
