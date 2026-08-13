@@ -19783,6 +19783,14 @@ impl Config {
             "web_search.tavily_base_url",
             &self.web_search.tavily_base_url,
         )?;
+        let tavily_base_url = reqwest::Url::parse(&self.web_search.tavily_base_url)?;
+        if !tavily_base_url.username().is_empty() || tavily_base_url.password().is_some() {
+            validation_bail!(
+                InvalidFormat,
+                "web_search.tavily_base_url",
+                "web_search.tavily_base_url must not include credentials"
+            );
+        }
 
         // Tunnel — OpenVPN
         if self.tunnel.tunnel_provider.trim() == "openvpn" {
@@ -24484,7 +24492,12 @@ enabled = true
 
     #[tokio::test]
     async fn validate_web_search_tavily_base_url_rejects_invalid_urls() {
-        for base_url in ["", "ftp://example.com", "http://?query"] {
+        for base_url in [
+            "",
+            "ftp://example.com",
+            "http://?query",
+            "https://user:password@example.com/tavily",
+        ] {
             let mut config = Config::default();
             config.web_search.tavily_base_url = base_url.to_string();
             let error = config

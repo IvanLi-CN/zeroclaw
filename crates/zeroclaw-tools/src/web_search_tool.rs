@@ -428,7 +428,9 @@ impl WebSearchTool {
         let builder = reqwest::Client::builder().timeout(Duration::from_secs(self.timeout_secs));
         let builder =
             zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
-        Ok(builder.build()?)
+        Ok(builder
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?)
     }
 
     /// Inner Tavily request implementation, parameterized on the HTTP
@@ -1887,6 +1889,55 @@ mod tests {
         assert_eq!(body["max_results"], 5);
         assert_eq!(body["include_answer"], false);
         assert_eq!(body["include_raw_content"], false);
+    }
+
+    #[tokio::test]
+    async fn test_tavily_request_does_not_follow_redirects() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/tavily/search"))
+            .and(header("authorization", "Bearer tvly-test-key"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/redirected", server.uri())),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/redirected"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query": "what is rust",
+                "results": []
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let tool = WebSearchTool::new_with_config_and_tavily_base_url(
+            "tavily".to_string(),
+            None,
+            Some("tvly-test-key".to_string()),
+            format!("{}/api/tavily", server.uri()),
+            None,
+            None,
+            5,
+            15,
+            PathBuf::new(),
+            false,
+        );
+
+        let error = tool
+            .search_tavily("what is rust")
+            .await
+            .expect_err("Tavily redirects should not be followed");
+        assert!(
+            error.to_string().contains("307 Temporary Redirect"),
+            "{error}"
+        );
     }
 
     #[test]
