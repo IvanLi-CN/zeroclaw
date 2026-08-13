@@ -407,7 +407,6 @@ impl WebSearchTool {
     }
 
     async fn search_tavily(&self, query: &str) -> anyhow::Result<String> {
-        let client = self.build_tavily_client()?;
         let mut url = reqwest::Url::parse(&self.tavily_base_url).map_err(|error| {
             ::zeroclaw_log::record!(
                 ERROR,
@@ -418,8 +417,19 @@ impl WebSearchTool {
             );
             anyhow::Error::msg(format!("Invalid Tavily base URL: {error}"))
         })?;
+        if !url.username().is_empty() || url.password().is_some() {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"search_provider": "tavily"})),
+                "web_search: Tavily base URL contains credentials"
+            );
+            anyhow::bail!("Tavily base URL must not include credentials");
+        }
         let path = format!("{}/search", url.path().trim_end_matches('/'));
         url.set_path(&path);
+        let client = self.build_tavily_client()?;
         self.search_tavily_with_client(&client, url.as_str(), query)
             .await
     }
@@ -1936,6 +1946,33 @@ mod tests {
             .expect_err("Tavily redirects should not be followed");
         assert!(
             error.to_string().contains("307 Temporary Redirect"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tavily_request_rejects_base_url_credentials() {
+        let tool = WebSearchTool::new_with_config_and_tavily_base_url(
+            "tavily".to_string(),
+            None,
+            Some("tvly-test-key".to_string()),
+            "https://user:password@example.com/api/tavily".to_string(),
+            None,
+            None,
+            5,
+            15,
+            PathBuf::new(),
+            false,
+        );
+
+        let error = tool
+            .search_tavily("what is rust")
+            .await
+            .expect_err("Tavily URL credentials should fail at the request boundary");
+        assert!(
+            error
+                .to_string()
+                .contains("Tavily base URL must not include credentials"),
             "{error}"
         );
     }
