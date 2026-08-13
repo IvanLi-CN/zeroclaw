@@ -172,7 +172,7 @@ async-trait = "0.1"
 ring = { version = "0.17", optional = true }
 
 # LRU cache for bounded sender state
-lru = { version = "0.16", optional = true }
+lru = { version = "0.18", optional = true }
 
 # Memory / persistence (migration.rs, behind agent-runtime)
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
@@ -185,14 +185,14 @@ dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 console = "0.16"
 
 # TUI onboarding (ratatui + crossterm)
-ratatui = { version = "0.30", default-features = true, optional = true }
+ratatui = { version = "0.30.2", default-features = true, optional = true }
 crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 
 # Hardware discovery (device path globbing)
 glob = { version = "0.3", optional = true }
 
 # Nostr key validation for wizard (behind channel-nostr feature)
-nostr-sdk = { version = "0.44", default-features = false, optional = true }
+nostr-sdk = { version = "0.45", default-features = false, optional = true }
 
 # Binary discovery (init system detection)
 which = { version = "8.0", optional = true }
