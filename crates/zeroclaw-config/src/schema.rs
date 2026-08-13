@@ -7809,6 +7809,9 @@ pub struct WebSearchConfig {
     #[credential_class = "encrypted_secret"]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub tavily_api_key: Option<String>,
+    /// Tavily-compatible API base URL. The search tool appends `/search`.
+    #[serde(default = "default_tavily_base_url")]
+    pub tavily_base_url: String,
     /// Jina AI API key (required if search_provider is "jina")
     #[serde(default)]
     #[secret]
@@ -7836,6 +7839,10 @@ fn default_web_search_provider() -> String {
     "duckduckgo".into()
 }
 
+fn default_tavily_base_url() -> String {
+    "https://api.tavily.com".into()
+}
+
 fn default_web_search_max_results() -> usize {
     5
 }
@@ -7851,6 +7858,7 @@ impl Default for WebSearchConfig {
             search_provider: default_web_search_provider(),
             brave_api_key: None,
             tavily_api_key: None,
+            tavily_base_url: default_tavily_base_url(),
             jina_api_key: None,
             bocha_api_key: None,
             searxng_instance_url: None,
@@ -19771,6 +19779,10 @@ impl Config {
     /// obviously invalid values early instead of failing at arbitrary runtime points.
     pub fn validate(&self) -> Result<()> {
         validate_memory_rerank_config(&self.memory)?;
+        validate_http_base_url(
+            "web_search.tavily_base_url",
+            &self.web_search.tavily_base_url,
+        )?;
 
         // Tunnel — OpenVPN
         if self.tunnel.tunnel_provider.trim() == "openvpn" {
@@ -24436,6 +24448,53 @@ enabled = true
             msg.contains("channels.telegram.default.reply_min_interval_secs"),
             "error must name the offending path; got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn web_search_tavily_base_url_defaults_to_official_api() {
+        let config: WebSearchConfig = toml::from_str("search_provider = \"tavily\"")
+            .expect("legacy web_search config should deserialize");
+        assert_eq!(config.tavily_base_url, "https://api.tavily.com");
+
+        let mut config = config;
+        config.tavily_base_url = "https://tavily.example.com/api/tavily".to_string();
+        let serialized = toml::to_string(&config).expect("web_search config should serialize");
+        let reloaded: WebSearchConfig =
+            toml::from_str(&serialized).expect("serialized web_search config should reload");
+        assert_eq!(
+            reloaded.tavily_base_url,
+            "https://tavily.example.com/api/tavily"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_web_search_tavily_base_url_accepts_http_and_https() {
+        for base_url in [
+            "https://api.tavily.com",
+            "https://tavily.ivanli.cc/api/tavily",
+            "http://localhost:8080/tavily",
+        ] {
+            let mut config = Config::default();
+            config.web_search.tavily_base_url = base_url.to_string();
+            config
+                .validate()
+                .unwrap_or_else(|error| panic!("expected {base_url} to be valid: {error}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_web_search_tavily_base_url_rejects_invalid_urls() {
+        for base_url in ["", "ftp://example.com", "http://?query"] {
+            let mut config = Config::default();
+            config.web_search.tavily_base_url = base_url.to_string();
+            let error = config
+                .validate()
+                .expect_err("invalid Tavily base URL should fail validation");
+            assert!(
+                error.to_string().contains("web_search.tavily_base_url"),
+                "unexpected error for {base_url:?}: {error}"
+            );
+        }
     }
 
     #[test]
