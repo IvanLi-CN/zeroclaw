@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"static":["TURN_TELEGRAM_STICKER_CONTEXT"],"struct":["TelegramStickerConfig","TelegramStickerTool","TelegramStickerTurnContext"],"type":["TelegramStickerConfigResolver"]};
