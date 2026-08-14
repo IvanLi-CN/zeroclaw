@@ -53,6 +53,26 @@ Conditionally registered:
 | `sop_*` tools | Registered when `sop.sops_dir` is configured: run and inspect SOPs |
 | `discord_search` | Registered when a Discord alias has `archive` enabled |
 
+### Tavily-compatible search
+
+Tavily uses `https://api.tavily.com` by default. Set
+`web_search.tavily_base_url` to the base URL of a compatible service; ZeroClaw
+removes trailing slashes and appends `/search`. The value may use HTTP or HTTPS,
+so operators using HTTP are responsible for protecting the bearer token in
+transit.
+
+For example, Tavily Hikari uses the following configuration:
+
+```toml
+[web_search]
+search_provider = "tavily"
+tavily_base_url = "https://tavily.ivanli.cc/api/tavily"
+tavily_api_key = "<Hikari access token>"
+```
+
+The base URL is adopted when the daemon reloads its configuration. A standalone
+`zeroclaw gateway start` process must be restarted.
+
 ## Extension protocols
 
 Beyond built-in tools, ZeroClaw supports the **[MCP](./mcp.md)** (Model Context Protocol) extension surface. Connect any MCP server (Claude Code's filesystem, Playwright, your own) and the agent picks up its tools at startup.

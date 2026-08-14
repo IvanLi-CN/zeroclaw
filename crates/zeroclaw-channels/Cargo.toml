@@ -18,7 +18,7 @@ zeroclaw-runtime.workspace = true
 zeroclaw-tool-call-parser.workspace = true
 zeroclaw-tools.workspace = true
 anyhow = "1.0"
-lru = "0.16"
+lru = "0.18"
 rumqttc = { version = "0.25", optional = true }
 notify = { version = "6", optional = true }
 glob = { version = "0.3", optional = true }
@@ -71,7 +71,10 @@ matrix-sdk = { version = "0.18", optional = true, default-features = false, feat
   "sqlite",
 ] }
 mime_guess = { version = "2", optional = true }
-nostr-sdk = { version = "0.44", default-features = false, features = [
+nostr-sdk = { version = "0.45", default-features = false, optional = true }
+nostr = { version = "0.45", default-features = false, features = [
+  "std",
+  "os-rng",
   "nip04",
   "nip59",
 ], optional = true }
@@ -225,7 +228,7 @@ channel-git = ["provider-github", "provider-gitea"]
 provider-github = ["dep:jsonwebtoken", "dep:thiserror"]
 provider-gitea = []
 channel-line = []
-channel-nostr = ["dep:nostr-sdk"]
+channel-nostr = ["dep:nostr-sdk", "dep:nostr"]
 whatsapp-web = [
   "dep:bytes",
   "dep:prost",

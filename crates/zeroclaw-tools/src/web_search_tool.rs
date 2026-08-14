@@ -9,6 +9,8 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use zeroclaw_api::tool::{Tool, ToolResult};
 
+const DEFAULT_TAVILY_BASE_URL: &str = "https://api.tavily.com";
+
 /// Web search tool for searching the internet.
 /// Supports multiple model_providers: DuckDuckGo (free), Brave (requires API key),
 /// Tavily (requires API key), SearXNG (self-hosted, requires instance URL),
@@ -29,6 +31,8 @@ pub struct WebSearchTool {
     boot_brave_api_key: Option<String>,
     /// Boot-time Tavily key snapshot.
     boot_tavily_api_key: Option<String>,
+    /// Tavily-compatible API base URL. Search requests append `/search`.
+    tavily_base_url: String,
     /// Boot-time Jina AI key snapshot.
     boot_jina_api_key: Option<String>,
     /// SearXNG instance base URL (e.g. `"https://searx.example.com"`).
@@ -53,6 +57,7 @@ impl WebSearchTool {
             model_provider: model_provider.trim().to_lowercase(),
             boot_brave_api_key: brave_api_key,
             boot_tavily_api_key: None,
+            tavily_base_url: DEFAULT_TAVILY_BASE_URL.to_string(),
             boot_jina_api_key: jina_api_key,
             searxng_instance_url: None,
             max_results: max_results.clamp(1, 10),
@@ -74,10 +79,38 @@ impl WebSearchTool {
         config_path: PathBuf,
         secrets_encrypt: bool,
     ) -> Self {
+        Self::new_with_config_and_tavily_base_url(
+            model_provider,
+            brave_api_key,
+            tavily_api_key,
+            DEFAULT_TAVILY_BASE_URL.to_string(),
+            jina_api_key,
+            searxng_instance_url,
+            max_results,
+            timeout_secs,
+            config_path,
+            secrets_encrypt,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_config_and_tavily_base_url(
+        model_provider: String,
+        brave_api_key: Option<String>,
+        tavily_api_key: Option<String>,
+        tavily_base_url: String,
+        jina_api_key: Option<String>,
+        searxng_instance_url: Option<String>,
+        max_results: usize,
+        timeout_secs: u64,
+        config_path: PathBuf,
+        secrets_encrypt: bool,
+    ) -> Self {
         Self {
             model_provider: model_provider.trim().to_lowercase(),
             boot_brave_api_key: brave_api_key,
             boot_tavily_api_key: tavily_api_key,
+            tavily_base_url,
             boot_jina_api_key: jina_api_key,
             searxng_instance_url,
             max_results: max_results.clamp(1, 10),
@@ -374,8 +407,30 @@ impl WebSearchTool {
     }
 
     async fn search_tavily(&self, query: &str) -> anyhow::Result<String> {
+        let mut url = reqwest::Url::parse(&self.tavily_base_url).map_err(|error| {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"search_provider": "tavily"})),
+                "web_search: invalid Tavily base URL"
+            );
+            anyhow::Error::msg(format!("Invalid Tavily base URL: {error}"))
+        })?;
+        if !url.username().is_empty() || url.password().is_some() {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"search_provider": "tavily"})),
+                "web_search: Tavily base URL contains credentials"
+            );
+            anyhow::bail!("Tavily base URL must not include credentials");
+        }
+        let path = format!("{}/search", url.path().trim_end_matches('/'));
+        url.set_path(&path);
         let client = self.build_tavily_client()?;
-        self.search_tavily_with_client(&client, "https://api.tavily.com/search", query)
+        self.search_tavily_with_client(&client, url.as_str(), query)
             .await
     }
 
@@ -383,7 +438,9 @@ impl WebSearchTool {
         let builder = reqwest::Client::builder().timeout(Duration::from_secs(self.timeout_secs));
         let builder =
             zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
-        Ok(builder.build()?)
+        Ok(builder
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?)
     }
 
     /// Inner Tavily request implementation, parameterized on the HTTP
@@ -1781,14 +1838,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tavily_request_uses_bearer_auth_header_not_body_field() {
+    async fn test_tavily_custom_base_url_appends_search_and_uses_bearer_auth() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/search"))
+            .and(path("/api/tavily/search"))
             .and(header("authorization", "Bearer tvly-test-key"))
             .and(header("content-type", "application/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1798,10 +1855,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let tool = WebSearchTool::new_with_config(
+        let tool = WebSearchTool::new_with_config_and_tavily_base_url(
             "tavily".to_string(),
             None,
             Some("tvly-test-key".to_string()),
+            format!("{}/api/tavily///", server.uri()),
             None,
             None,
             5,
@@ -1810,12 +1868,8 @@ mod tests {
             false,
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("client builder should succeed without a proxy");
         let result = tool
-            .search_tavily_with_client(&client, &format!("{}/search", server.uri()), "what is rust")
+            .search_tavily("what is rust")
             .await
             .expect("request should succeed against the mock");
         assert!(
@@ -1845,6 +1899,82 @@ mod tests {
         assert_eq!(body["max_results"], 5);
         assert_eq!(body["include_answer"], false);
         assert_eq!(body["include_raw_content"], false);
+    }
+
+    #[tokio::test]
+    async fn test_tavily_request_does_not_follow_redirects() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/tavily/search"))
+            .and(header("authorization", "Bearer tvly-test-key"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/redirected", server.uri())),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/redirected"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query": "what is rust",
+                "results": []
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let tool = WebSearchTool::new_with_config_and_tavily_base_url(
+            "tavily".to_string(),
+            None,
+            Some("tvly-test-key".to_string()),
+            format!("{}/api/tavily", server.uri()),
+            None,
+            None,
+            5,
+            15,
+            PathBuf::new(),
+            false,
+        );
+
+        let error = tool
+            .search_tavily("what is rust")
+            .await
+            .expect_err("Tavily redirects should not be followed");
+        assert!(
+            error.to_string().contains("307 Temporary Redirect"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tavily_request_rejects_base_url_credentials() {
+        let tool = WebSearchTool::new_with_config_and_tavily_base_url(
+            "tavily".to_string(),
+            None,
+            Some("tvly-test-key".to_string()),
+            "https://user:password@example.com/api/tavily".to_string(),
+            None,
+            None,
+            5,
+            15,
+            PathBuf::new(),
+            false,
+        );
+
+        let error = tool
+            .search_tavily("what is rust")
+            .await
+            .expect_err("Tavily URL credentials should fail at the request boundary");
+        assert!(
+            error
+                .to_string()
+                .contains("Tavily base URL must not include credentials"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1899,6 +2029,7 @@ mod tests {
             model_provider: "searxng".into(),
             boot_brave_api_key: None,
             boot_tavily_api_key: None,
+            tavily_base_url: DEFAULT_TAVILY_BASE_URL.to_string(),
             boot_jina_api_key: None,
             searxng_instance_url: Some("https://searx.example.com".to_string()),
             max_results: 5,
