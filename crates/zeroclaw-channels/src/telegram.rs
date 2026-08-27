@@ -1634,6 +1634,10 @@ impl TelegramChannel {
             return;
         };
 
+        if self.group_allowlist_authorization(message) == Some(true) {
+            return;
+        }
+
         let Some(text) = message.get("text").and_then(serde_json::Value::as_str) else {
             return;
         };
@@ -6686,6 +6690,217 @@ mod tests {
                     | "/bottoken/sendChatAction"
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn allowed_group_without_mention_listener_skips_bind_prompt() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "xbb",
+            Arc::new(|| vec!["approved-dm".into()]),
+            true,
+        )
+        .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
+        .with_ack_reactions(true)
+        .with_api_base(mock_server.uri());
+        let update = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 7,
+                "text": "ordinary group message",
+                "from": { "id": 7, "username": "group-member" },
+                "chat": { "id": -100_200_300, "type": "supergroup" }
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bottoken/getMe$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "id": 42, "is_bot": true, "username": "xbb_astr_bot" }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottoken/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 0,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [] })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottoken/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 30,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [update] })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let listener = ch.listen(tx);
+        tokio::pin!(listener);
+        tokio::select! {
+            result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let requests = mock_server.received_requests().await.unwrap();
+                    if requests.iter().any(|request| {
+                        let body = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+                        request.url.path() == "/bottoken/getUpdates"
+                            && body.as_ref().and_then(|body| body.get("timeout"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(30)
+                            && body.as_ref().and_then(|body| body.get("offset"))
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(2)
+                    }) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => match result {
+                Ok(()) => {}
+                Err(_) => panic!(
+                    "listener did not advance past the allowed group message: {:?}",
+                    mock_server.received_requests().await.unwrap()
+                ),
+            }
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an unmentioned allowed-group message must not reach dispatch"
+        );
+        let requests = mock_server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|request| {
+            !matches!(
+                request.url.path(),
+                "/bottoken/sendMessage"
+                    | "/bottoken/setMessageReaction"
+                    | "/bottoken/sendChatAction"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn unbound_direct_message_listener_sends_alias_scoped_bind_prompt() {
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "xbb",
+            Arc::new(|| vec!["approved-dm".into()]),
+            false,
+        )
+        .with_api_base(mock_server.uri());
+        let update = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 8,
+                "text": "hello from a direct message",
+                "from": { "id": 17, "username": "unbound-user" },
+                "chat": { "id": 17, "type": "private" }
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottoken/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 0,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [] })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottoken/getUpdates$"))
+            .and(body_json(serde_json::json!({
+                "offset": 0,
+                "timeout": 30,
+                "allowed_updates": ["message", "callback_query"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "result": [update] })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/bottoken/sendMessage$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 9 }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let listener = ch.listen(tx);
+        tokio::pin!(listener);
+        tokio::select! {
+            result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let requests = mock_server.received_requests().await.unwrap();
+                    if requests.iter().any(|request| {
+                        request.url.path() == "/bottoken/sendMessage"
+                            && serde_json::from_slice::<serde_json::Value>(&request.body)
+                                .ok()
+                                .and_then(|body| body.get("text").cloned())
+                                .and_then(|text| text.as_str().map(str::to_owned))
+                                .is_some_and(|text| {
+                                    text.contains("zeroclaw channel bind-telegram")
+                                        && text.contains("--alias xbb")
+                                })
+                    }) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => match result {
+                Ok(()) => {}
+                Err(_) => panic!(
+                    "listener did not send the alias-scoped bind prompt: {:?}",
+                    mock_server.received_requests().await.unwrap()
+                ),
+            }
+        }
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let bind_prompts = requests
+            .iter()
+            .filter(|request| request.url.path() == "/bottoken/sendMessage")
+            .collect::<Vec<_>>();
+        assert_eq!(bind_prompts.len(), 1);
+        let body = serde_json::from_slice::<serde_json::Value>(&bind_prompts[0].body).unwrap();
+        let text = body
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(text.contains("zeroclaw channel bind-telegram"));
+        assert!(text.contains("--alias xbb"));
     }
 
     #[test]
