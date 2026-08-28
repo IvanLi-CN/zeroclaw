@@ -1083,6 +1083,12 @@ impl TelegramChannel {
             .is_some_and(|username| target.eq_ignore_ascii_case(username))
     }
 
+    fn is_qualified_bind_command(text: &str) -> bool {
+        text.split_whitespace()
+            .next()
+            .is_some_and(|command| command.starts_with("/bind@"))
+    }
+
     fn pairing_code_active(&self) -> bool {
         self.pairing
             .as_ref()
@@ -1659,11 +1665,10 @@ impl TelegramChannel {
     }
 
     fn should_handle_bind_command(&self, message: &serde_json::Value) -> bool {
-        let is_bind_command = message
+        message
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| self.is_bind_command_for_this_bot(text));
-        is_bind_command && !self.is_sender_allowed(message)
+            .is_some_and(|text| self.is_bind_command_for_this_bot(text))
     }
 
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
@@ -4151,6 +4156,19 @@ Ensure only one `zeroclaw` process is using this bot token."
 
                     if let Some(message) = update.get("message")
                         && self.group_allowlist_authorization(message) == Some(false)
+                    {
+                        continue;
+                    }
+
+                    if let Some(message) = update.get("message")
+                        && message
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(Self::is_qualified_bind_command)
+                        && !message
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|text| self.is_bind_command_for_this_bot(text))
                     {
                         continue;
                     }
