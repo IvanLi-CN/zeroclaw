@@ -81,7 +81,7 @@ fn manual_stable_release_calls_container_matrix_at_release_tag() {
         .trim();
     assert_eq!(
         permissions,
-        "contents: read\n      packages: write\n      id-token: write\n      security-events: write",
+        "contents: read\n      packages: write\n      id-token: write\n      security-events: write\n      attestations: read",
         "Docker matrix call permissions must remain minimal and complete"
     );
 

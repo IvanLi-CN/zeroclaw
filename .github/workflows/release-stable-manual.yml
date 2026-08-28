@@ -1102,6 +1102,7 @@ jobs:
       packages: write
       id-token: write
       security-events: write
+      attestations: read
 
   docker:
     name: Push Docker Image
