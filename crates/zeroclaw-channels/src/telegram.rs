@@ -1058,11 +1058,29 @@ impl TelegramChannel {
         parts.next().map(str::trim).filter(|code| !code.is_empty())
     }
 
-    fn is_bind_command(text: &str) -> bool {
-        text.split_whitespace()
-            .next()
-            .and_then(|command| command.split('@').next())
-            == Some(TELEGRAM_BIND_COMMAND)
+    fn is_bind_command_for_this_bot(&self, text: &str) -> bool {
+        let command = text.split_whitespace().next();
+        let Some(command) = command else {
+            return false;
+        };
+        let Some(base_command) = command.split('@').next() else {
+            return false;
+        };
+        if base_command != TELEGRAM_BIND_COMMAND {
+            return false;
+        }
+
+        let Some(target) = command.strip_prefix("/bind@").map(str::trim) else {
+            return true;
+        };
+        if target.is_empty() {
+            return false;
+        }
+
+        self.bot_username
+            .lock()
+            .as_deref()
+            .is_none_or(|username| target.eq_ignore_ascii_case(username))
     }
 
     fn pairing_code_active(&self) -> bool {
@@ -1644,7 +1662,7 @@ impl TelegramChannel {
         let is_bind_command = message
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(Self::is_bind_command);
+            .is_some_and(|text| self.is_bind_command_for_this_bot(text));
         is_bind_command && !self.is_sender_allowed(message)
     }
 
@@ -1657,7 +1675,7 @@ impl TelegramChannel {
             && !message
                 .get("text")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(Self::is_bind_command)
+                .is_some_and(|text| self.is_bind_command_for_this_bot(text))
         {
             return;
         }
@@ -1705,63 +1723,69 @@ impl TelegramChannel {
             return;
         }
 
-        if let Some(code) = Self::extract_bind_code(text) {
-            if let Some(pairing) = self.pairing.as_ref() {
-                match pairing.try_pair(code, &chat_id).await {
-                    Ok(Some(_token)) => {
-                        let bind_identity = normalized_sender_id.clone().or_else(|| {
-                            if normalized_username.is_empty() || normalized_username == "unknown" {
-                                None
-                            } else {
-                                Some(normalized_username.clone())
-                            }
-                        });
+        if let Some(code) = Self::extract_bind_code(text)
+            && self.is_bind_command_for_this_bot(text)
+        {
+            let Some(bind_identity) = normalized_sender_id.clone().or_else(|| {
+                if normalized_username.is_empty() || normalized_username == "unknown" {
+                    None
+                } else {
+                    Some(normalized_username.clone())
+                }
+            }) else {
+                let _ = self
+                    .send(&SendMessage::new(
+                        "❌ Could not identify your Telegram account. Ensure your account has a username or stable user ID, then retry.",
+                        &chat_id,
+                    ))
+                    .await;
+                return;
+            };
 
-                        if let Some(identity) = bind_identity {
-                            match Box::pin(self.persist_allowed_identity(&identity)).await {
-                                Ok(()) => {
-                                    let _ = self
-                                        .send(&SendMessage::new(
-                                            "✅ Telegram account bound successfully. You can talk to ZeroClaw now.",
-                                            &chat_id,
-                                        ))
-                                        .await;
-                                    ::zeroclaw_log::record!(
-                                        INFO,
-                                        ::zeroclaw_log::Event::new(
-                                            module_path!(),
-                                            ::zeroclaw_log::Action::Note
-                                        )
-                                        .with_attrs(::serde_json::json!({"identity": identity})),
-                                        "paired and allowlisted identity="
-                                    );
-                                }
-                                Err(e) => {
-                                    ::zeroclaw_log::record!(
-                                        ERROR,
-                                        ::zeroclaw_log::Event::new(
-                                            module_path!(),
-                                            ::zeroclaw_log::Action::Fail
-                                        )
-                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                        .with_attrs(::serde_json::json!({"e": e.to_string()})),
-                                        "failed to persist allowlist after bind"
-                                    );
-                                    let _ = self
-                                        .send(&SendMessage::new(
-                                            "⚠️ Bound for this runtime, but failed to persist config. Access may be lost after restart; check config file permissions.",
-                                            &chat_id,
-                                        ))
-                                        .await;
-                                }
+            let pairing_client_id = if Self::is_group_message(message) {
+                bind_identity.as_str()
+            } else {
+                &chat_id
+            };
+            if let Some(pairing) = self.pairing.as_ref() {
+                match pairing.try_pair(code, pairing_client_id).await {
+                    Ok(Some(_token)) => {
+                        match Box::pin(self.persist_allowed_identity(&bind_identity)).await {
+                            Ok(()) => {
+                                let _ = self
+                                    .send(&SendMessage::new(
+                                        "✅ Telegram account bound successfully. You can talk to ZeroClaw now.",
+                                        &chat_id,
+                                    ))
+                                    .await;
+                                ::zeroclaw_log::record!(
+                                    INFO,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Note
+                                    )
+                                    .with_attrs(::serde_json::json!({"identity": bind_identity})),
+                                    "paired and allowlisted identity="
+                                );
                             }
-                        } else {
-                            let _ = self
-                                .send(&SendMessage::new(
-                                    "❌ Could not identify your Telegram account. Ensure your account has a username or stable user ID, then retry.",
-                                    &chat_id,
-                                ))
-                                .await;
+                            Err(e) => {
+                                ::zeroclaw_log::record!(
+                                    ERROR,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Fail
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                    .with_attrs(::serde_json::json!({"e": e.to_string()})),
+                                    "failed to persist allowlist after bind"
+                                );
+                                let _ = self
+                                    .send(&SendMessage::new(
+                                        "⚠️ Bound for this runtime, but failed to persist config. Access may be lost after restart; check config file permissions.",
+                                        &chat_id,
+                                    ))
+                                    .await;
+                            }
                         }
                     }
                     Ok(None) => {
@@ -5301,6 +5325,17 @@ mod tests {
     fn telegram_extract_bind_code_rejects_invalid_forms() {
         assert_eq!(TelegramChannel::extract_bind_code("/bind"), None);
         assert_eq!(TelegramChannel::extract_bind_code("/start"), None);
+    }
+
+    #[test]
+    fn telegram_bind_command_rejects_other_bot_targets() {
+        let ch = TelegramChannel::new("token".into(), "xbb", Arc::new(Vec::new), true);
+        *ch.bot_username.lock() = Some("zeroclaw_bot".into());
+
+        assert!(ch.is_bind_command_for_this_bot("/bind 123456"));
+        assert!(ch.is_bind_command_for_this_bot("/bind@zeroclaw_bot 123456"));
+        assert!(!ch.is_bind_command_for_this_bot("/bind@other_bot 123456"));
+        assert!(!ch.is_bind_command_for_this_bot("/bind@ 123456"));
     }
 
     #[test]
