@@ -1080,7 +1080,7 @@ impl TelegramChannel {
         self.bot_username
             .lock()
             .as_deref()
-            .is_none_or(|username| target.eq_ignore_ascii_case(username))
+            .is_some_and(|username| target.eq_ignore_ascii_case(username))
     }
 
     fn pairing_code_active(&self) -> bool {
@@ -3853,9 +3853,7 @@ impl Channel for TelegramChannel {
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         let mut offset: i64 = 0;
 
-        if self.mention_only {
-            let _ = self.get_bot_username().await;
-        }
+        let _ = self.get_bot_username().await;
 
         ::zeroclaw_log::record!(
             INFO,
@@ -3956,11 +3954,9 @@ impl Channel for TelegramChannel {
         self.register_bot_commands().await;
 
         loop {
-            if self.mention_only {
-                let missing_username = self.bot_username.lock().is_none();
-                if missing_username {
-                    let _ = self.get_bot_username().await;
-                }
+            let missing_username = self.bot_username.lock().is_none();
+            if missing_username {
+                let _ = self.get_bot_username().await;
             }
 
             let url = self.api_url("getUpdates");
