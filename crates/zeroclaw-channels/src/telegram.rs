@@ -1645,7 +1645,7 @@ impl TelegramChannel {
             .get("text")
             .and_then(serde_json::Value::as_str)
             .is_some_and(Self::is_bind_command);
-        self.pairing_code_active() && is_bind_command && !self.is_sender_allowed(message)
+        is_bind_command && !self.is_sender_allowed(message)
     }
 
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
@@ -5301,6 +5301,25 @@ mod tests {
     fn telegram_extract_bind_code_rejects_invalid_forms() {
         assert_eq!(TelegramChannel::extract_bind_code("/bind"), None);
         assert_eq!(TelegramChannel::extract_bind_code("/start"), None);
+    }
+
+    #[test]
+    fn unbound_allowed_group_bind_is_prehandled_without_pairing() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "xbb",
+            Arc::new(|| vec!["approved-user".into()]),
+            false,
+        )
+        .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]));
+        let message = serde_json::json!({
+            "text": "/bind expired-code",
+            "from": { "id": 17, "username": "unbound-user" },
+            "chat": { "id": -100_200_300, "type": "supergroup" }
+        });
+
+        assert!(ch.pairing.is_none());
+        assert!(ch.should_handle_bind_command(&message));
     }
 
     #[test]
