@@ -3858,7 +3858,12 @@ impl Channel for TelegramChannel {
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         let mut offset: i64 = 0;
 
-        let _ = self.get_bot_username().await;
+        loop {
+            if self.get_bot_username().await.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
 
         ::zeroclaw_log::record!(
             INFO,
@@ -3960,9 +3965,8 @@ impl Channel for TelegramChannel {
 
         loop {
             let missing_username = self.bot_username.lock().is_none();
-            if missing_username && self.get_bot_username().await.is_none() {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+            if missing_username {
+                let _ = self.get_bot_username().await;
             }
 
             let url = self.api_url("getUpdates");
@@ -4050,6 +4054,19 @@ Ensure only one `zeroclaw` process is using this bot token."
 
             if let Some(results) = data.get("result").and_then(serde_json::Value::as_array) {
                 for update in results {
+                    if let Some(message) = update.get("message")
+                        && message
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(Self::is_qualified_bind_command)
+                        && self.bot_username.lock().is_none()
+                    {
+                        let _ = self.get_bot_username().await;
+                        if self.bot_username.lock().is_none() {
+                            break;
+                        }
+                    }
+
                     // Advance offset past this update
                     if let Some(uid) = update.get("update_id").and_then(serde_json::Value::as_i64) {
                         offset = uid + 1;
