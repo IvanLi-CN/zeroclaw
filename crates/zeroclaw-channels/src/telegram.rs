@@ -1623,11 +1623,7 @@ impl TelegramChannel {
         identities.into_iter().any(|id| self.is_user_allowed(id))
     }
 
-    fn is_message_authorized(&self, message: &serde_json::Value) -> bool {
-        if let Some(group_allowed) = self.group_allowlist_authorization(message) {
-            return group_allowed;
-        }
-
+    fn is_sender_allowed(&self, message: &serde_json::Value) -> bool {
         let (username, sender_id, _) = Self::extract_sender_info(message);
         let mut identities = vec![username.as_str()];
         if let Some(id) = sender_id.as_deref() {
@@ -1636,16 +1632,33 @@ impl TelegramChannel {
         self.is_any_user_allowed(identities.iter().copied())
     }
 
+    fn is_message_authorized(&self, message: &serde_json::Value) -> bool {
+        if let Some(group_allowed) = self.group_allowlist_authorization(message) {
+            return group_allowed;
+        }
+
+        self.is_sender_allowed(message)
+    }
+
+    fn should_handle_bind_command(&self, message: &serde_json::Value) -> bool {
+        let is_bind_command = message
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(Self::is_bind_command);
+        self.pairing_code_active() && is_bind_command && !self.is_sender_allowed(message)
+    }
+
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
         let Some(message) = update.get("message") else {
             return;
         };
 
-        let is_bind_command = message
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(Self::is_bind_command);
-        if self.group_allowlist_authorization(message) == Some(true) && !is_bind_command {
+        if self.group_allowlist_authorization(message) == Some(true)
+            && !message
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(Self::is_bind_command)
+        {
             return;
         }
 
@@ -4119,6 +4132,13 @@ Ensure only one `zeroclaw` process is using this bot token."
                     if let Some(message) = update.get("message")
                         && self.group_allowlist_authorization(message) == Some(false)
                     {
+                        continue;
+                    }
+
+                    if let Some(message) = update.get("message")
+                        && self.should_handle_bind_command(message)
+                    {
+                        Box::pin(self.handle_unauthorized_message(update)).await;
                         continue;
                     }
 
@@ -6809,13 +6829,12 @@ mod tests {
         }));
     }
 
-    #[tokio::test]
-    async fn allowed_group_bind_command_reaches_pairing_without_mention() {
+    async fn assert_allowed_group_bind_command_reaches_pairing(mention_only: bool) {
         use wiremock::matchers::{body_json, method, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
-        let ch = TelegramChannel::new("token".into(), "xbb", Arc::new(Vec::new), true)
+        let ch = TelegramChannel::new("token".into(), "xbb", Arc::new(Vec::new), mention_only)
             .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
             .with_api_base(mock_server.uri());
         let pairing_code = ch
@@ -6926,6 +6945,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowed_group_bind_command_reaches_pairing_without_mention() {
+        assert_allowed_group_bind_command_reaches_pairing(true).await;
+    }
+
+    #[tokio::test]
+    async fn allowed_group_bind_command_precedes_dispatch_without_mention_only() {
+        assert_allowed_group_bind_command_reaches_pairing(false).await;
+    }
+
+    #[tokio::test]
     async fn unbound_direct_message_listener_sends_alias_scoped_bind_prompt() {
         use wiremock::matchers::{body_json, method, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6937,6 +6966,7 @@ mod tests {
             Arc::new(|| vec!["approved-dm".into()]),
             false,
         )
+        .with_ack_reactions(true)
         .with_api_base(mock_server.uri());
         let update = serde_json::json!({
             "update_id": 1,
@@ -6983,7 +7013,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let listener = ch.listen(tx);
         tokio::pin!(listener);
         tokio::select! {
@@ -7028,6 +7058,16 @@ mod tests {
             .unwrap();
         assert!(text.contains("zeroclaw channel bind-telegram"));
         assert!(text.contains("--alias xbb"));
+        assert!(
+            rx.try_recv().is_err(),
+            "an unauthorized DM must not dispatch"
+        );
+        assert!(requests.iter().all(|request| {
+            !matches!(
+                request.url.path(),
+                "/bottoken/setMessageReaction" | "/bottoken/sendChatAction"
+            )
+        }));
     }
 
     #[test]
