@@ -1058,37 +1058,6 @@ impl TelegramChannel {
         parts.next().map(str::trim).filter(|code| !code.is_empty())
     }
 
-    fn is_bind_command_for_this_bot(&self, text: &str) -> bool {
-        let command = text.split_whitespace().next();
-        let Some(command) = command else {
-            return false;
-        };
-        let Some(base_command) = command.split('@').next() else {
-            return false;
-        };
-        if base_command != TELEGRAM_BIND_COMMAND {
-            return false;
-        }
-
-        let Some(target) = command.strip_prefix("/bind@").map(str::trim) else {
-            return true;
-        };
-        if target.is_empty() {
-            return false;
-        }
-
-        self.bot_username
-            .lock()
-            .as_deref()
-            .is_some_and(|username| target.eq_ignore_ascii_case(username))
-    }
-
-    fn is_qualified_bind_command(text: &str) -> bool {
-        text.split_whitespace()
-            .next()
-            .is_some_and(|command| command.starts_with("/bind@"))
-    }
-
     fn pairing_code_active(&self) -> bool {
         self.pairing
             .as_ref()
@@ -1647,7 +1616,11 @@ impl TelegramChannel {
         identities.into_iter().any(|id| self.is_user_allowed(id))
     }
 
-    fn is_sender_allowed(&self, message: &serde_json::Value) -> bool {
+    fn is_message_authorized(&self, message: &serde_json::Value) -> bool {
+        if let Some(group_allowed) = self.group_allowlist_authorization(message) {
+            return group_allowed;
+        }
+
         let (username, sender_id, _) = Self::extract_sender_info(message);
         let mut identities = vec![username.as_str()];
         if let Some(id) = sender_id.as_deref() {
@@ -1656,32 +1629,12 @@ impl TelegramChannel {
         self.is_any_user_allowed(identities.iter().copied())
     }
 
-    fn is_message_authorized(&self, message: &serde_json::Value) -> bool {
-        if let Some(group_allowed) = self.group_allowlist_authorization(message) {
-            return group_allowed;
-        }
-
-        self.is_sender_allowed(message)
-    }
-
-    fn should_handle_bind_command(&self, message: &serde_json::Value) -> bool {
-        message
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| self.is_bind_command_for_this_bot(text))
-    }
-
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
         let Some(message) = update.get("message") else {
             return;
         };
 
-        if self.group_allowlist_authorization(message) == Some(true)
-            && !message
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| self.is_bind_command_for_this_bot(text))
-        {
+        if self.group_allowlist_authorization(message) == Some(true) {
             return;
         }
 
@@ -1728,69 +1681,63 @@ impl TelegramChannel {
             return;
         }
 
-        if let Some(code) = Self::extract_bind_code(text)
-            && self.is_bind_command_for_this_bot(text)
-        {
-            let Some(bind_identity) = normalized_sender_id.clone().or_else(|| {
-                if normalized_username.is_empty() || normalized_username == "unknown" {
-                    None
-                } else {
-                    Some(normalized_username.clone())
-                }
-            }) else {
-                let _ = self
-                    .send(&SendMessage::new(
-                        "❌ Could not identify your Telegram account. Ensure your account has a username or stable user ID, then retry.",
-                        &chat_id,
-                    ))
-                    .await;
-                return;
-            };
-
-            let pairing_client_id = if Self::is_group_message(message) {
-                bind_identity.as_str()
-            } else {
-                &chat_id
-            };
+        if let Some(code) = Self::extract_bind_code(text) {
             if let Some(pairing) = self.pairing.as_ref() {
-                match pairing.try_pair(code, pairing_client_id).await {
+                match pairing.try_pair(code, &chat_id).await {
                     Ok(Some(_token)) => {
-                        match Box::pin(self.persist_allowed_identity(&bind_identity)).await {
-                            Ok(()) => {
-                                let _ = self
-                                    .send(&SendMessage::new(
-                                        "✅ Telegram account bound successfully. You can talk to ZeroClaw now.",
-                                        &chat_id,
-                                    ))
-                                    .await;
-                                ::zeroclaw_log::record!(
-                                    INFO,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_attrs(::serde_json::json!({"identity": bind_identity})),
-                                    "paired and allowlisted identity="
-                                );
+                        let bind_identity = normalized_sender_id.clone().or_else(|| {
+                            if normalized_username.is_empty() || normalized_username == "unknown" {
+                                None
+                            } else {
+                                Some(normalized_username.clone())
                             }
-                            Err(e) => {
-                                ::zeroclaw_log::record!(
-                                    ERROR,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Fail
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                    .with_attrs(::serde_json::json!({"e": e.to_string()})),
-                                    "failed to persist allowlist after bind"
-                                );
-                                let _ = self
-                                    .send(&SendMessage::new(
-                                        "⚠️ Bound for this runtime, but failed to persist config. Access may be lost after restart; check config file permissions.",
-                                        &chat_id,
-                                    ))
-                                    .await;
+                        });
+
+                        if let Some(identity) = bind_identity {
+                            match Box::pin(self.persist_allowed_identity(&identity)).await {
+                                Ok(()) => {
+                                    let _ = self
+                                        .send(&SendMessage::new(
+                                            "✅ Telegram account bound successfully. You can talk to ZeroClaw now.",
+                                            &chat_id,
+                                        ))
+                                        .await;
+                                    ::zeroclaw_log::record!(
+                                        INFO,
+                                        ::zeroclaw_log::Event::new(
+                                            module_path!(),
+                                            ::zeroclaw_log::Action::Note
+                                        )
+                                        .with_attrs(::serde_json::json!({"identity": identity})),
+                                        "paired and allowlisted identity="
+                                    );
+                                }
+                                Err(e) => {
+                                    ::zeroclaw_log::record!(
+                                        ERROR,
+                                        ::zeroclaw_log::Event::new(
+                                            module_path!(),
+                                            ::zeroclaw_log::Action::Fail
+                                        )
+                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                        .with_attrs(::serde_json::json!({"e": e.to_string()})),
+                                        "failed to persist allowlist after bind"
+                                    );
+                                    let _ = self
+                                        .send(&SendMessage::new(
+                                            "⚠️ Bound for this runtime, but failed to persist config. Access may be lost after restart; check config file permissions.",
+                                            &chat_id,
+                                        ))
+                                        .await;
+                                }
                             }
+                        } else {
+                            let _ = self
+                                .send(&SendMessage::new(
+                                    "❌ Could not identify your Telegram account. Ensure your account has a username or stable user ID, then retry.",
+                                    &chat_id,
+                                ))
+                                .await;
                         }
                     }
                     Ok(None) => {
@@ -3858,7 +3805,9 @@ impl Channel for TelegramChannel {
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         let mut offset: i64 = 0;
 
-        let _ = self.get_bot_username().await;
+        if self.mention_only {
+            let _ = self.get_bot_username().await;
+        }
 
         ::zeroclaw_log::record!(
             INFO,
@@ -3959,9 +3908,11 @@ impl Channel for TelegramChannel {
         self.register_bot_commands().await;
 
         loop {
-            let missing_username = self.bot_username.lock().is_none();
-            if missing_username {
-                let _ = self.get_bot_username().await;
+            if self.mention_only {
+                let missing_username = self.bot_username.lock().is_none();
+                if missing_username {
+                    let _ = self.get_bot_username().await;
+                }
             }
 
             let url = self.api_url("getUpdates");
@@ -4157,26 +4108,6 @@ Ensure only one `zeroclaw` process is using this bot token."
                     if let Some(message) = update.get("message")
                         && self.group_allowlist_authorization(message) == Some(false)
                     {
-                        continue;
-                    }
-
-                    if let Some(message) = update.get("message")
-                        && message
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(Self::is_qualified_bind_command)
-                        && !message
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|text| self.is_bind_command_for_this_bot(text))
-                    {
-                        continue;
-                    }
-
-                    if let Some(message) = update.get("message")
-                        && self.should_handle_bind_command(message)
-                    {
-                        Box::pin(self.handle_unauthorized_message(update)).await;
                         continue;
                     }
 
@@ -5339,36 +5270,6 @@ mod tests {
     fn telegram_extract_bind_code_rejects_invalid_forms() {
         assert_eq!(TelegramChannel::extract_bind_code("/bind"), None);
         assert_eq!(TelegramChannel::extract_bind_code("/start"), None);
-    }
-
-    #[test]
-    fn telegram_bind_command_rejects_other_bot_targets() {
-        let ch = TelegramChannel::new("token".into(), "xbb", Arc::new(Vec::new), true);
-        *ch.bot_username.lock() = Some("zeroclaw_bot".into());
-
-        assert!(ch.is_bind_command_for_this_bot("/bind 123456"));
-        assert!(ch.is_bind_command_for_this_bot("/bind@zeroclaw_bot 123456"));
-        assert!(!ch.is_bind_command_for_this_bot("/bind@other_bot 123456"));
-        assert!(!ch.is_bind_command_for_this_bot("/bind@ 123456"));
-    }
-
-    #[test]
-    fn unbound_allowed_group_bind_is_prehandled_without_pairing() {
-        let ch = TelegramChannel::new(
-            "token".into(),
-            "xbb",
-            Arc::new(|| vec!["approved-user".into()]),
-            false,
-        )
-        .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]));
-        let message = serde_json::json!({
-            "text": "/bind expired-code",
-            "from": { "id": 17, "username": "unbound-user" },
-            "chat": { "id": -100_200_300, "type": "supergroup" }
-        });
-
-        assert!(ch.pairing.is_none());
-        assert!(ch.should_handle_bind_command(&message));
     }
 
     #[test]
@@ -6718,14 +6619,6 @@ mod tests {
             }
         });
 
-        Mock::given(method("GET"))
-            .and(path_regex(r"/bottoken/getMe$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": { "id": 42, "is_bot": true, "username": "home_bot" }
-            })))
-            .mount(&mock_server)
-            .await;
         Mock::given(method("POST"))
             .and(path_regex(r"/bot[^/]+/getUpdates$"))
             .and(body_json(serde_json::json!({
@@ -6905,131 +6798,6 @@ mod tests {
         }));
     }
 
-    async fn assert_allowed_group_bind_command_reaches_pairing(mention_only: bool) {
-        use wiremock::matchers::{body_json, method, path_regex};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
-        let ch = TelegramChannel::new("token".into(), "xbb", Arc::new(Vec::new), mention_only)
-            .with_allowed_groups_resolver(Arc::new(|| vec![-100_200_300]))
-            .with_api_base(mock_server.uri());
-        let pairing_code = ch
-            .pairing
-            .as_ref()
-            .and_then(PairingGuard::pairing_code)
-            .expect("channel without peers starts pairing");
-        let update = serde_json::json!({
-            "update_id": 1,
-            "message": {
-                "message_id": 8,
-                "text": format!("/bind {pairing_code}"),
-                "from": { "id": 17, "username": "group-member" },
-                "chat": { "id": -100_200_300, "type": "supergroup" }
-            }
-        });
-
-        Mock::given(method("GET"))
-            .and(path_regex(r"/bottoken/getMe$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": { "id": 42, "is_bot": true, "username": "xbb_astr_bot" }
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path_regex(r"/bottoken/getUpdates$"))
-            .and(body_json(serde_json::json!({
-                "offset": 0,
-                "timeout": 0,
-                "allowed_updates": ["message", "callback_query"]
-            })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "ok": true, "result": [] })),
-            )
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path_regex(r"/bottoken/getUpdates$"))
-            .and(body_json(serde_json::json!({
-                "offset": 0,
-                "timeout": 30,
-                "allowed_updates": ["message", "callback_query"]
-            })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "ok": true, "result": [update] })),
-            )
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path_regex(r"/bottoken/sendMessage$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": { "message_id": 9 }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let listener = ch.listen(tx);
-        tokio::pin!(listener);
-        tokio::select! {
-            result = &mut listener => panic!("listener exited unexpectedly: {result:?}"),
-            result = tokio::time::timeout(Duration::from_secs(1), async {
-                loop {
-                    let requests = mock_server.received_requests().await.unwrap();
-                    if requests.iter().any(|request| {
-                        request.url.path() == "/bottoken/sendMessage"
-                            && serde_json::from_slice::<serde_json::Value>(&request.body)
-                                .ok()
-                                .and_then(|body| body.get("text").cloned())
-                                .and_then(|text| text.as_str().map(str::to_owned))
-                                .is_some_and(|text| text.contains("bound successfully"))
-                    }) {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            }) => match result {
-                Ok(()) => {}
-                Err(_) => panic!(
-                    "listener did not process the allowed-group bind command: {:?}",
-                    mock_server.received_requests().await.unwrap()
-                ),
-            }
-        }
-
-        assert!(
-            rx.try_recv().is_err(),
-            "a bind command must not reach agent dispatch"
-        );
-        let requests = mock_server.received_requests().await.unwrap();
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.url.path() == "/bottoken/sendMessage")
-                .count(),
-            1
-        );
-        assert!(requests.iter().all(|request| {
-            !matches!(
-                request.url.path(),
-                "/bottoken/setMessageReaction" | "/bottoken/sendChatAction"
-            )
-        }));
-    }
-
-    #[tokio::test]
-    async fn allowed_group_bind_command_reaches_pairing_without_mention() {
-        assert_allowed_group_bind_command_reaches_pairing(true).await;
-    }
-
-    #[tokio::test]
-    async fn allowed_group_bind_command_precedes_dispatch_without_mention_only() {
-        assert_allowed_group_bind_command_reaches_pairing(false).await;
-    }
-
     #[tokio::test]
     async fn unbound_direct_message_listener_sends_alias_scoped_bind_prompt() {
         use wiremock::matchers::{body_json, method, path_regex};
@@ -7042,7 +6810,6 @@ mod tests {
             Arc::new(|| vec!["approved-dm".into()]),
             false,
         )
-        .with_ack_reactions(true)
         .with_api_base(mock_server.uri());
         let update = serde_json::json!({
             "update_id": 1,
@@ -7054,14 +6821,6 @@ mod tests {
             }
         });
 
-        Mock::given(method("GET"))
-            .and(path_regex(r"/bottoken/getMe$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": { "id": 42, "is_bot": true, "username": "xbb_astr_bot" }
-            })))
-            .mount(&mock_server)
-            .await;
         Mock::given(method("POST"))
             .and(path_regex(r"/bottoken/getUpdates$"))
             .and(body_json(serde_json::json!({
@@ -7097,7 +6856,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let listener = ch.listen(tx);
         tokio::pin!(listener);
         tokio::select! {
@@ -7142,16 +6901,6 @@ mod tests {
             .unwrap();
         assert!(text.contains("zeroclaw channel bind-telegram"));
         assert!(text.contains("--alias xbb"));
-        assert!(
-            rx.try_recv().is_err(),
-            "an unauthorized DM must not dispatch"
-        );
-        assert!(requests.iter().all(|request| {
-            !matches!(
-                request.url.path(),
-                "/bottoken/setMessageReaction" | "/bottoken/sendChatAction"
-            )
-        }));
     }
 
     #[test]
