@@ -3960,8 +3960,9 @@ impl Channel for TelegramChannel {
 
         loop {
             let missing_username = self.bot_username.lock().is_none();
-            if missing_username {
-                let _ = self.get_bot_username().await;
+            if missing_username && self.get_bot_username().await.is_none() {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
             }
 
             let url = self.api_url("getUpdates");
@@ -6718,6 +6719,14 @@ mod tests {
             }
         });
 
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bottoken/getMe$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "id": 42, "is_bot": true, "username": "home_bot" }
+            })))
+            .mount(&mock_server)
+            .await;
         Mock::given(method("POST"))
             .and(path_regex(r"/bot[^/]+/getUpdates$"))
             .and(body_json(serde_json::json!({
@@ -7046,6 +7055,14 @@ mod tests {
             }
         });
 
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bottoken/getMe$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "id": 42, "is_bot": true, "username": "xbb_astr_bot" }
+            })))
+            .mount(&mock_server)
+            .await;
         Mock::given(method("POST"))
             .and(path_regex(r"/bottoken/getUpdates$"))
             .and(body_json(serde_json::json!({
